@@ -4,8 +4,8 @@
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="ff1a8957-2744-44b7-b070-85fa04c3ddab" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="d1514556-29bc-4ee4-afeb-b7abf89489e0">
+    <configuration-properties doc:name="Configuration properties" doc:id="ac5a6026-6aff-46bf-a813-29dc5507bb74" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="36582a3b-7c7b-4963-84b6-8a6db9ede943">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <flow name="customer-onboarding-main">
@@ -131,19 +131,19 @@ output application/json
         <logger level="INFO" message="get:\customers\verify:customer-onboarding-config" />
     </flow>
     <flow name="post:\customers\register:application\json:customer-onboarding-config">
-    <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
-    <logger level="INFO" message='#["Registration request received, correlationId=" ++ vars.correlationId]' doc:name="Log request received"/>
-    <ee:transform doc:name="Validate fields">
-        <ee:message/>
-        <ee:variables>
-            <ee:set-variable variableName="validationErrors" resource="dwl/validateRegistration.dwl"/>
-        </ee:variables>
-    </ee:transform>
-    <choice doc:name="Any validation errors?">
-        <when expression="#[sizeOf(vars.validationErrors) > 0]">
-            <ee:transform doc:name="Build 400 response">
-                <ee:message>
-                    <ee:set-payload><![CDATA[%dw 2.0
+        <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message='#["Registration request received, correlationId=" ++ vars.correlationId]' doc:name="Log request received"/>
+        <ee:transform doc:name="Validate fields">
+            <ee:message/>
+            <ee:variables>
+                <ee:set-variable variableName="validationErrors" resource="dwl/validateRegistration.dwl"/>
+            </ee:variables>
+        </ee:transform>
+        <choice doc:name="Any validation errors?">
+            <when expression="#[sizeOf(vars.validationErrors) > 0]">
+                <ee:transform doc:name="Build 400 response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
 output application/json
 ---
 {
@@ -152,18 +152,132 @@ output application/json
   correlationId: vars.correlationId,
   errors: vars.validationErrors
 }]]></ee:set-payload>
-                </ee:message>
-                <ee:variables>
-                    <ee:set-variable variableName="httpStatus">400</ee:set-variable>
-                </ee:variables>
-            </ee:transform>
-        </when>
-        <otherwise>
-            <set-payload value='#[output application/json --- {message: "Validation passed (database step not built yet)", correlationId: vars.correlationId}]' doc:name="Temporary success"/>
-            <set-variable variableName="httpStatus" value="#[201]" doc:name="Set status 201"/>
-        </otherwise>
-    </choice>
-</flow>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <ee:transform doc:name="Generate IDs and token">
+                    <ee:message/>
+                    <ee:variables>
+                        <ee:set-variable variableName="ids"><![CDATA[%dw 2.0
+import dw::Crypto
+import toHex from dw::core::Binaries
+output application/java
+var cleanName = upper(payload.company.companyName replace /[^A-Za-z0-9]/ with "")
+var prefix = if (sizeOf(cleanName) > 8) cleanName[0 to 7] else cleanName
+var rawToken = (uuid() ++ uuid()) replace /-/ with ""
+---
+{
+  customerId: "CUS-" ++ (now().year as String) ++ "-" ++ ((floor(random() * 900000) + 100000) as String),
+  tenantId: "TNT-" ++ prefix ++ "-" ++ upper(uuid()[0 to 3]),
+  userId: "USR-" ++ upper(uuid()[0 to 7]),
+  token: rawToken,
+  tokenHash: toHex(Crypto::hashWith(rawToken as Binary, "SHA-256")),
+  expiresAtIso: (now() + |PT24H|) as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+}]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+                <db:select config-ref="Database_Config" target="existingUsers" doc:name="Check duplicate email">
+                    <db:sql><![CDATA[SELECT user_id FROM customer_users WHERE email = :email]]></db:sql>
+                    <db:input-parameters><![CDATA[#[{ email: lower(payload.primaryContact.email) }]]]></db:input-parameters>
+                </db:select>
+                <choice doc:name="Email already registered?">
+                    <when expression="#[sizeOf(vars.existingUsers) > 0]">
+                        <logger level="WARN" message='#["Duplicate registration rejected, correlationId=" ++ vars.correlationId]' doc:name="Log duplicate"/>
+                        <ee:transform doc:name="Build 409 response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "DUPLICATE_EMAIL",
+  message: "An account already exists for this email. Please sign in or reset your password.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus">409</ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </when>
+                    <otherwise>
+                        <try doc:name="Create account (one transaction)" transactionalAction="ALWAYS_BEGIN" transactionType="LOCAL">
+                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert customer">
+                                <db:sql><![CDATA[INSERT INTO customers (customer_id, tenant_id, company_name, industry, employee_count, gst_number, address_line1, city, state, postal_code, country, plan_code, seats, billing_currency, region, account_status, marketing_opt_in, terms_accepted_at, correlation_id) VALUES (:customerId, :tenantId, :companyName, :industry, :employeeCount, :gstNumber, :addressLine1, :city, :state, :postalCode, :country, :planCode, :seats, :billingCurrency, :region, :accountStatus, :marketingOptIn, :termsAcceptedAt, :correlationId)]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{
+  customerId: vars.ids.customerId,
+  tenantId: vars.ids.tenantId,
+  companyName: payload.company.companyName,
+  industry: payload.company.industry,
+  employeeCount: payload.company.employeeCount,
+  gstNumber: payload.company.gstNumber,
+  addressLine1: payload.company.address.addressLine1,
+  city: payload.company.address.city,
+  state: payload.company.address.state,
+  postalCode: payload.company.address.postalCode,
+  country: payload.company.address.country,
+  planCode: payload.subscription.planCode,
+  seats: payload.subscription.seats,
+  billingCurrency: payload.subscription.billingCurrency,
+  region: payload.subscription.region,
+  accountStatus: "PENDING_VERIFICATION",
+  marketingOptIn: payload.consent.marketingOptIn default false,
+  termsAcceptedAt: (payload.consent.acceptedAt as DateTime) as String {format: "yyyy-MM-dd HH:mm:ss"},
+  correlationId: vars.correlationId
+}]]]></db:input-parameters>
+                            </db:insert>
+                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert primary user">
+                                <db:sql><![CDATA[INSERT INTO customer_users (user_id, customer_id, email, first_name, last_name, phone, job_title, user_role, user_status) VALUES (:userId, :customerId, :email, :firstName, :lastName, :phone, :jobTitle, :userRole, :userStatus)]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{
+  userId: vars.ids.userId,
+  customerId: vars.ids.customerId,
+  email: lower(payload.primaryContact.email),
+  firstName: payload.primaryContact.firstName,
+  lastName: payload.primaryContact.lastName,
+  phone: payload.primaryContact.phone,
+  jobTitle: payload.primaryContact.jobTitle,
+  userRole: "PRIMARY_ADMIN",
+  userStatus: "PENDING"
+}]]]></db:input-parameters>
+                            </db:insert>
+                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert token hash">
+                                <db:sql><![CDATA[INSERT INTO verification_tokens (token_hash, customer_id, email, expires_at) VALUES (:tokenHash, :customerId, :email, DATE_ADD(NOW(), INTERVAL 24 HOUR))]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{
+  tokenHash: vars.ids.tokenHash,
+  customerId: vars.ids.customerId,
+  email: lower(payload.primaryContact.email)
+}]]]></db:input-parameters>
+                            </db:insert>
+                        </try>
+                        <logger level="INFO" message='#["Customer created, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log customer created"/>
+                        <ee:transform doc:name="Build 201 response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  customerId: vars.ids.customerId,
+  tenantId: vars.ids.tenantId,
+  accountStatus: "PENDING_VERIFICATION",
+  planCode: payload.subscription.planCode,
+  seats: payload.subscription.seats,
+  verificationEmailSent: false,
+  verificationExpiresAt: vars.ids.expiresAtIso,
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus">201</ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </otherwise>
+                </choice>
+            </otherwise>
+        </choice>
+    </flow>
     <flow name="post:\customers\resend-verification:application\json:customer-onboarding-config">
         <logger level="INFO" message="post:\customers\resend-verification:application\json:customer-onboarding-config" />
     </flow>
