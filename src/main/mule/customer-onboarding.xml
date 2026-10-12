@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd  http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd">
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:vm="http://www.mulesoft.org/schema/mule/vm" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd  http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
     <http:listener-config name="customer-onboarding-httpListenerConfig">
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="99b66de5-9985-4048-ae2e-660257694921" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="77022c0e-62cd-4bbd-8667-937406be025c">
+    <configuration-properties doc:name="Configuration properties" doc:id="6c6bf877-f64f-4520-8c6d-280ba5e408cd" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="bd7f9bfa-b8b4-48d8-85e3-ee9ab37ef13c">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
         <email:smtp-connection host="${smtp.host}" port="${smtp.port}" user="${smtp.user}" password="${smtp.password}" />
     </email:smtp-config>
+    <vm:config name="VM_Config" doc:name="VM Config">
+        <vm:queues>
+            <vm:queue queueName="provisioningQueue" queueType="PERSISTENT" />
+        </vm:queues>
+    </vm:config>
     <flow name="customer-onboarding-main">
         <http:listener config-ref="customer-onboarding-httpListenerConfig" path="/api/v1/*">
             <http:response statusCode="#[vars.httpStatus default 200]">
@@ -129,6 +134,13 @@ output application/json
                 </ee:transform>
             </on-error-propagate>
         </error-handler>
+    </flow>
+    <flow name="provisioning-consumer-simulator">
+        <vm:listener config-ref="VM_Config" queueName="provisioningQueue" doc:name="Listen on provisioning queue"/>
+        <logger level="INFO" message='#["[SIMULATED PROVISIONING] Event received: " ++ payload.eventType ++ ", correlationId=" ++ payload.correlationId]' doc:name="Log event received"/>
+        <logger level="INFO" message='#["[SIMULATED PROVISIONING] Creating workspace for tenant " ++ payload.payload.tenantId ++ " in region " ++ payload.payload.region ++ " (data residency " ++ payload.payload.dataResidency ++ ")"]' doc:name="Simulate workspace creation"/>
+        <logger level="INFO" message='#["[SIMULATED PROVISIONING] Seeding default data for tenant " ++ payload.payload.tenantId]' doc:name="Simulate default data seeding"/>
+        <logger level="INFO" message='#["[SIMULATED PROVISIONING] Applying licence limits: seats=" ++ (payload.payload.seats as String) ++ ", entitlements=" ++ (payload.payload.entitlements joinBy ",")]' doc:name="Simulate licence limits"/>
     </flow>
     <flow name="get:\customers\verify:customer-onboarding-config">
         <logger level="INFO" message="get:\customers\verify:customer-onboarding-config" />
@@ -266,9 +278,9 @@ output application/json
                         <try doc:name="Send welcome email (failure must not fail registration)">
                             <until-successful maxRetries="2" millisBetweenRetries="2000" doc:name="Retry email send">
                                 <email:send config-ref="SMTP_Config" fromAddress="no-reply@customer-onboarding.example.com" subject="Welcome to the platform – verify your account" doc:name="Send welcome email">
-<email:to-addresses>
-    <email:to-address value="#[payload.primaryContact.email]"/>
-</email:to-addresses>
+                                    <email:to-addresses>
+                                        <email:to-address value="#[payload.primaryContact.email]"/>
+                                    </email:to-addresses>
                                     <email:body contentType="text/plain" encoding="UTF-8">
                                         <email:content><![CDATA[#[vars.emailBody]]]></email:content>
                                     </email:body>
@@ -289,9 +301,36 @@ output application/json
                                 </on-error-continue>
                             </error-handler>
                         </try>
-                        <ee:transform doc:name="Build 201 response">
-                            <ee:message>
-                                <ee:set-payload><![CDATA[%dw 2.0
+                        <ee:transform doc:name="Build provisioning event">
+                            <ee:message/>
+                            <ee:variables>
+                                <ee:set-variable variableName="provisioningEvent" resource="dwl/provisioningEvent.dwl"/>
+                            </ee:variables>
+                        </ee:transform>
+                        <set-variable variableName="provisioningOk" value="#[true]" doc:name="Assume provisioning queued"/>
+                        <try doc:name="Publish provisioning event (retry, then compensate)">
+                            <until-successful maxRetries="3" millisBetweenRetries="1000" doc:name="Retry publish">
+                                <vm:publish config-ref="VM_Config" queueName="${queue.publishName}" doc:name="Publish ACCOUNT_SETUP_REQUESTED">
+                                    <vm:content><![CDATA[#[vars.provisioningEvent]]]></vm:content>
+                                </vm:publish>
+                            </until-successful>
+                            <logger level="INFO" message='#["Provisioning event published, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log event published"/>
+                            <error-handler>
+                                <on-error-continue>
+                                    <set-variable variableName="provisioningOk" value="#[false]" doc:name="Provisioning failed"/>
+                                    <db:update config-ref="Database_Config" target="statusUpdateResult" doc:name="Mark PROVISIONING_FAILED">
+                                        <db:sql><![CDATA[UPDATE customers SET account_status = 'PROVISIONING_FAILED', updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                                    </db:update>
+                                    <logger level="ERROR" message='#["ALERT: PROVISIONING_FAILED, customerId=" ++ vars.ids.customerId ++ ", tenantId=" ++ vars.ids.tenantId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Internal alert"/>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                        <choice doc:name="Provisioning queued?">
+                            <when expression="#[vars.provisioningOk]">
+                                <ee:transform doc:name="Build 201 response">
+                                    <ee:message>
+                                        <ee:set-payload><![CDATA[%dw 2.0
 output application/json
 ---
 {
@@ -304,11 +343,30 @@ output application/json
   verificationExpiresAt: vars.ids.expiresAtIso,
   correlationId: vars.correlationId
 }]]></ee:set-payload>
-                            </ee:message>
-                            <ee:variables>
-                                <ee:set-variable variableName="httpStatus">201</ee:set-variable>
-                            </ee:variables>
-                        </ee:transform>
+                                    </ee:message>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="httpStatus">201</ee:set-variable>
+                                    </ee:variables>
+                                </ee:transform>
+                            </when>
+                            <otherwise>
+                                <ee:transform doc:name="Build provisioning failure response">
+                                    <ee:message>
+                                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "PROVISIONING_FAILED",
+  message: "Your account was created but workspace setup could not be started. Our team has been notified.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                                    </ee:message>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+                                    </ee:variables>
+                                </ee:transform>
+                            </otherwise>
+                        </choice>
                     </otherwise>
                 </choice>
             </otherwise>
