@@ -1,74 +1,139 @@
 #%RAML 1.0
 title: Customer Onboarding API
 version: v1
-baseUri: http://localhost:8081/api
 mediaType: application/json
 
 types:
-  RegisterRequest:
+  ErrorResponse:
     type: object
     properties:
-      name: string
-      email: string
-      password: string
-  LoginRequest:
-    type: object
-    properties:
-      email: string
-      password: string
-  Message:
-    type: object
-    properties:
+      code: string
       message: string
+      correlationId: string
+      errors?:
+        type: array
+        items:
+          type: object
+          properties:
+            field: string
+            message: string
 
-/register:
-  post:
-    description: Create a new customer account. A verification email is queued.
-    body:
-      application/json:
-        type: RegisterRequest
-    responses:
-      201:
-        body:
-          application/json:
-            type: Message
-      400:
-        body:
-          application/json:
-            type: Message
-      409:
-        body:
-          application/json:
-            type: Message
-
-/verify:
-  get:
-    description: Confirm an email address using the token sent by email.
-    queryParameters:
-      token:
-        type: string
-        required: true
-    responses:
-      200:
-        body:
-          application/json:
-            type: Message
-      400:
-        body:
-          application/json:
-            type: Message
-
-/login:
-  post:
-    body:
-      application/json:
-        type: LoginRequest
-    responses:
-      200:
-        body:
-          application/json:
-            type: Message
-      401:
-        body:
-          application/json:
-            type: Message
+/customers:
+  /register:
+    post:
+      description: Register a new customer. Field-level checks run in the flow so every error is returned together.
+      headers:
+        Idempotency-Key:
+          type: string
+          required: false
+          description: Unique key per registration attempt. Checked in the flow.
+          example: 9f2b41ac-77de-4f10-8b55-1c0d3a4e7f21
+      body:
+        application/json:
+          type: object
+          example: |
+            {
+              "company": {
+                "companyName": "Bright Analytics Pvt Ltd",
+                "industry": "PROFESSIONAL_SERVICES",
+                "employeeCount": 120,
+                "gstNumber": "33ABCDE1234F1Z5",
+                "address": {
+                  "addressLine1": "14 Rajiv Gandhi Salai",
+                  "city": "Chennai",
+                  "state": "Tamil Nadu",
+                  "postalCode": "600113",
+                  "country": "India"
+                }
+              },
+              "primaryContact": {
+                "firstName": "Divya",
+                "lastName": "Srinivasan",
+                "email": "divya.srinivasan@brightanalytics.com",
+                "phone": "+91-9845012345",
+                "jobTitle": "Operations Head"
+              },
+              "subscription": {
+                "planCode": "GROWTH_ANNUAL",
+                "seats": 25,
+                "billingCurrency": "INR",
+                "region": "AP_SOUTH"
+              },
+              "consent": {
+                "termsAccepted": true,
+                "marketingOptIn": false,
+                "acceptedAt": "2026-09-11T11:05:00+05:30"
+              }
+            }
+      responses:
+        201:
+          description: Registration created.
+          body:
+            application/json:
+              type: object
+        400:
+          description: Malformed JSON or one or more invalid fields.
+          body:
+            application/json:
+              type: ErrorResponse
+        409:
+          description: An account already exists for this email. Sign in or reset the password.
+          body:
+            application/json:
+              type: ErrorResponse
+        422:
+          description: Idempotency-Key was reused with a different request body.
+          body:
+            application/json:
+              type: ErrorResponse
+        500:
+          description: Unexpected server error.
+          body:
+            application/json:
+              type: ErrorResponse
+  /verify:
+    get:
+      description: Verify an email address using the token from the welcome email.
+      queryParameters:
+        token:
+          type: string
+          required: false
+          description: Plain verification token from the email link.
+      responses:
+        200:
+          description: Account activated.
+          body:
+            application/json:
+              type: object
+        400:
+          description: Token missing, unknown, expired or already used.
+          body:
+            application/json:
+              type: ErrorResponse
+        500:
+          description: Unexpected server error.
+          body:
+            application/json:
+              type: ErrorResponse
+  /resend-verification:
+    post:
+      description: Request a fresh verification email. Rate limited.
+      body:
+        application/json:
+          type: object
+      responses:
+        202:
+          description: A new verification email will be sent if the account is pending.
+          body:
+            application/json:
+              type: object
+        429:
+          description: Too many resend requests.
+          body:
+            application/json:
+              type: ErrorResponse
+        500:
+          description: Unexpected server error.
+          body:
+            application/json:
+              type: ErrorResponse
