@@ -4,8 +4,8 @@
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="6c6bf877-f64f-4520-8c6d-280ba5e408cd" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="bd7f9bfa-b8b4-48d8-85e3-ee9ab37ef13c">
+    <configuration-properties doc:name="Configuration properties" doc:id="fb0049d4-f860-4c1a-9dae-5cab2840c1ad" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="d102819a-b563-46af-a8c5-2f3d85a50509">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
@@ -14,6 +14,7 @@
     <vm:config name="VM_Config" doc:name="VM Config">
         <vm:queues>
             <vm:queue queueName="provisioningQueue" queueType="PERSISTENT" />
+            <vm:queue queueName="activationQueue" queueType="PERSISTENT" />
         </vm:queues>
     </vm:config>
     <flow name="customer-onboarding-main">
@@ -142,8 +143,155 @@ output application/json
         <logger level="INFO" message='#["[SIMULATED PROVISIONING] Seeding default data for tenant " ++ payload.payload.tenantId]' doc:name="Simulate default data seeding"/>
         <logger level="INFO" message='#["[SIMULATED PROVISIONING] Applying licence limits: seats=" ++ (payload.payload.seats as String) ++ ", entitlements=" ++ (payload.payload.entitlements joinBy ",")]' doc:name="Simulate licence limits"/>
     </flow>
+    <flow name="activation-consumer-simulator">
+        <vm:listener config-ref="VM_Config" queueName="activationQueue" doc:name="Listen on activation queue"/>
+        <logger level="INFO" message='#["[SIMULATED ACTIVATION] Event received: " ++ payload.eventType ++ ", correlationId=" ++ payload.correlationId]' doc:name="Log activation event received"/>
+        <logger level="INFO" message='#["[SIMULATED ACTIVATION] Marking workspace ready for tenant " ++ payload.payload.tenantId ++ ", plan " ++ payload.payload.planCode]' doc:name="Simulate workspace ready"/>
+    </flow>
+    <sub-flow name="build-verification-error">
+        <ee:transform doc:name="Build verification error response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: vars.errCode,
+  message: vars.errMessage,
+  (resendPath: "/api/v1/customers/resend-verification") if (vars.errCode == "TOKEN_EXPIRED"),
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+            </ee:message>
+            <ee:variables>
+                <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+    </sub-flow>
     <flow name="get:\customers\verify:customer-onboarding-config">
-        <logger level="INFO" message="get:\customers\verify:customer-onboarding-config" />
+        <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message='#["Verification request received, correlationId=" ++ vars.correlationId]' doc:name="Log verification request"/>
+        <set-variable variableName="tokenParam" value="#[attributes.queryParams.token default '']" doc:name="Read token (never logged)"/>
+        <choice doc:name="Token supplied?">
+            <when expression="#[isEmpty(vars.tokenParam)]">
+                <set-variable variableName="errCode" value="TOKEN_MISSING" doc:name="Code TOKEN_MISSING"/>
+                <set-variable variableName="errMessage" value="A verification token is required." doc:name="Message"/>
+                <flow-ref name="build-verification-error" doc:name="Build error"/>
+            </when>
+            <otherwise>
+                <ee:transform doc:name="Hash token">
+                    <ee:message/>
+                    <ee:variables>
+                        <ee:set-variable variableName="tokenHash"><![CDATA[%dw 2.0
+import dw::Crypto
+import toHex from dw::core::Binaries
+output application/java
+---
+toHex(Crypto::hashWith(vars.tokenParam as Binary, "SHA-256"))]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+                <db:select config-ref="Database_Config" target="tokenRow" doc:name="Find token by hash">
+                    <db:sql><![CDATA[SELECT t.customer_id, t.consumed_at, CASE WHEN t.expires_at <= NOW() THEN 1 ELSE 0 END AS is_expired, c.account_status FROM verification_tokens t JOIN customers c ON c.customer_id = t.customer_id WHERE t.token_hash = :tokenHash]]></db:sql>
+                    <db:input-parameters><![CDATA[#[{ tokenHash: vars.tokenHash }]]]></db:input-parameters>
+                </db:select>
+                <choice doc:name="Token state">
+                    <when expression="#[sizeOf(vars.tokenRow) == 0]">
+                        <logger level="WARN" message='#["Verification rejected: unknown token, correlationId=" ++ vars.correlationId]' doc:name="Log unknown"/>
+                        <set-variable variableName="errCode" value="TOKEN_INVALID" doc:name="Code TOKEN_INVALID"/>
+                        <set-variable variableName="errMessage" value="This verification link is not valid." doc:name="Message"/>
+                        <flow-ref name="build-verification-error" doc:name="Build error"/>
+                    </when>
+                    <when expression="#[vars.tokenRow[0].consumed_at != null]">
+                        <logger level="WARN" message='#["Verification rejected: token already used, correlationId=" ++ vars.correlationId]' doc:name="Log reused"/>
+                        <set-variable variableName="errCode" value="TOKEN_ALREADY_USED" doc:name="Code TOKEN_ALREADY_USED"/>
+                        <set-variable variableName="errMessage" value="This verification link has already been used." doc:name="Message"/>
+                        <flow-ref name="build-verification-error" doc:name="Build error"/>
+                    </when>
+                    <when expression="#[(vars.tokenRow[0].is_expired as Number) == 1]">
+                        <logger level="WARN" message='#["Verification rejected: token expired, correlationId=" ++ vars.correlationId]' doc:name="Log expired"/>
+                        <set-variable variableName="errCode" value="TOKEN_EXPIRED" doc:name="Code TOKEN_EXPIRED"/>
+                        <set-variable variableName="errMessage" value="This verification link has expired. Please request a new one." doc:name="Message"/>
+                        <flow-ref name="build-verification-error" doc:name="Build error"/>
+                    </when>
+                    <when expression="#[vars.tokenRow[0].account_status != 'PENDING_VERIFICATION']">
+                        <logger level="WARN" message='#["Verification rejected: account not pending, correlationId=" ++ vars.correlationId]' doc:name="Log not pending"/>
+                        <set-variable variableName="errCode" value="ACCOUNT_NOT_PENDING" doc:name="Code ACCOUNT_NOT_PENDING"/>
+                        <set-variable variableName="errMessage" value="This account cannot be verified. Please contact support." doc:name="Message"/>
+                        <flow-ref name="build-verification-error" doc:name="Build error"/>
+                    </when>
+                    <otherwise>
+                        <set-variable variableName="activated" value="#[false]" doc:name="Assume not activated"/>
+                        <try doc:name="Consume token and activate (one transaction)" transactionalAction="ALWAYS_BEGIN" transactionType="LOCAL">
+                            <db:update config-ref="Database_Config" target="consumeResult" doc:name="Consume token once">
+                                <db:sql><![CDATA[UPDATE verification_tokens SET consumed_at = NOW(), attempts = attempts + 1 WHERE token_hash = :tokenHash AND consumed_at IS NULL AND expires_at > NOW()]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{ tokenHash: vars.tokenHash }]]]></db:input-parameters>
+                            </db:update>
+                            <choice doc:name="Token consumed by this request?">
+                                <when expression="#[vars.consumeResult.affectedRows == 1]">
+                                    <db:update config-ref="Database_Config" target="customerUpdate" doc:name="Activate customer">
+                                        <db:sql><![CDATA[UPDATE customers SET account_status = 'ACTIVE', updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.tokenRow[0].customer_id }]]]></db:input-parameters>
+                                    </db:update>
+                                    <db:update config-ref="Database_Config" target="userUpdate" doc:name="Activate user">
+                                        <db:sql><![CDATA[UPDATE customer_users SET user_status = 'ACTIVE' WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.tokenRow[0].customer_id }]]]></db:input-parameters>
+                                    </db:update>
+                                    <set-variable variableName="activated" value="#[true]" doc:name="Activated"/>
+                                </when>
+                            </choice>
+                        </try>
+                        <choice doc:name="Activated?">
+                            <when expression="#[vars.activated]">
+                                <logger level="INFO" message='#["Account activated, customerId=" ++ vars.tokenRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log activated"/>
+                                <db:select config-ref="Database_Config" target="customerRow" doc:name="Load customer for event">
+                                    <db:sql><![CDATA[SELECT c.customer_id, c.tenant_id, c.company_name, c.plan_code, c.seats, c.region, u.email FROM customers c JOIN customer_users u ON u.customer_id = c.customer_id WHERE c.customer_id = :customerId]]></db:sql>
+                                    <db:input-parameters><![CDATA[#[{ customerId: vars.tokenRow[0].customer_id }]]]></db:input-parameters>
+                                </db:select>
+                                <ee:transform doc:name="Build activation event">
+                                    <ee:message/>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="activationEvent" resource="dwl/activationEvent.dwl"/>
+                                    </ee:variables>
+                                </ee:transform>
+                                <try doc:name="Publish activation event">
+                                    <until-successful maxRetries="3" millisBetweenRetries="1000" doc:name="Retry publish">
+                                        <vm:publish config-ref="VM_Config" queueName="activationQueue" doc:name="Publish ACCOUNT_ACTIVATED">
+                                            <vm:content><![CDATA[#[vars.activationEvent]]]></vm:content>
+                                        </vm:publish>
+                                    </until-successful>
+                                    <logger level="INFO" message='#["Activation event published, customerId=" ++ vars.customerRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log activation event published"/>
+                                    <error-handler>
+                                        <on-error-continue>
+                                            <logger level="ERROR" message='#["ALERT: ACTIVATION_EVENT_FAILED, customerId=" ++ vars.customerRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Internal alert"/>
+                                        </on-error-continue>
+                                    </error-handler>
+                                </try>
+                                <ee:transform doc:name="Build 200 response">
+                                    <ee:message>
+                                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  customerId: vars.customerRow[0].customer_id,
+  tenantId: vars.customerRow[0].tenant_id,
+  accountStatus: "ACTIVE",
+  message: "Email verified. Your account is now active.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                                    </ee:message>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="httpStatus">200</ee:set-variable>
+                                    </ee:variables>
+                                </ee:transform>
+                            </when>
+                            <otherwise>
+                                <set-variable variableName="errCode" value="TOKEN_ALREADY_USED" doc:name="Code TOKEN_ALREADY_USED"/>
+                                <set-variable variableName="errMessage" value="This verification link has already been used." doc:name="Message"/>
+                                <flow-ref name="build-verification-error" doc:name="Build error"/>
+                            </otherwise>
+                        </choice>
+                    </otherwise>
+                </choice>
+            </otherwise>
+        </choice>
     </flow>
     <flow name="post:\customers\register:application\json:customer-onboarding-config">
         <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
