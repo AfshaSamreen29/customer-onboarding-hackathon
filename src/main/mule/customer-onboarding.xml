@@ -4,8 +4,8 @@
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="fb0049d4-f860-4c1a-9dae-5cab2840c1ad" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="d102819a-b563-46af-a8c5-2f3d85a50509">
+    <configuration-properties doc:name="Configuration properties" doc:id="5d85e1b0-aafd-4e88-9b85-713f88620944" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="1558073a-bc51-41a3-b9af-fc82aa369020">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
@@ -35,7 +35,11 @@
                         <ee:set-payload><![CDATA[%dw 2.0
 output application/json
 ---
-{message: "Bad request"}]]></ee:set-payload>
+{
+  code: "BAD_REQUEST",
+  message: "The request is malformed, for example the JSON could not be read.",
+  correlationId: correlationId
+}]]></ee:set-payload>
                     </ee:message>
                     <ee:variables>
                         <ee:set-variable variableName="httpStatus">400</ee:set-variable>
@@ -107,6 +111,24 @@ output application/json
                     </ee:variables>
                 </ee:transform>
             </on-error-propagate>
+            <on-error-propagate>
+                <logger level="ERROR" message='#["Unexpected error, type=" ++ (error.errorType.namespace default "") ++ ":" ++ (error.errorType.identifier default "") ++ ", correlationId=" ++ (vars.correlationId default correlationId)]' doc:name="Log unexpected error"/>
+                <ee:transform doc:name="Build generic 500 response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "SYSTEM_ERROR",
+  message: "An unexpected error occurred. Please quote the correlation ID when contacting support.",
+  correlationId: vars.correlationId default correlationId
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </on-error-propagate>
         </error-handler>
     </flow>
     <flow name="customer-onboarding-console">
@@ -165,6 +187,386 @@ output application/json
                 <ee:set-variable variableName="httpStatus">400</ee:set-variable>
             </ee:variables>
         </ee:transform>
+    </sub-flow>
+    <sub-flow name="build-resend-accepted">
+        <ee:transform doc:name="Build 202 response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  message: "If this email belongs to an account that is awaiting verification, a new verification link has been sent.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+            </ee:message>
+            <ee:variables>
+                <ee:set-variable variableName="httpStatus">202</ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+    </sub-flow>
+    <sub-flow name="check-idempotency">
+        <ee:transform doc:name="Read key and hash request">
+            <ee:message/>
+            <ee:variables>
+                <ee:set-variable variableName="idemKey"><![CDATA[%dw 2.0
+output application/java
+---
+attributes.headers['idempotency-key'] default ""]]></ee:set-variable>
+                <ee:set-variable variableName="requestHash"><![CDATA[%dw 2.0
+import dw::Crypto
+import toHex from dw::core::Binaries
+output application/java
+---
+toHex(Crypto::hashWith(write(payload, "application/json") as Binary, "SHA-256"))]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <choice doc:name="Key valid?">
+            <when expression="#[not (vars.idemKey matches /^[A-Za-z0-9_-]{8,60}$/)]">
+                <set-variable variableName="idemState" value="INVALID" doc:name="State INVALID"/>
+                <logger level="WARN" message='#["Registration rejected: Idempotency-Key missing or invalid, correlationId=" ++ vars.correlationId]' doc:name="Log invalid key"/>
+                <ee:transform doc:name="Build 400 response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "IDEMPOTENCY_KEY_INVALID",
+  message: "The Idempotency-Key header is required and must be 8 to 60 characters (letters, digits, hyphen, underscore).",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <db:select config-ref="Database_Config" target="idemRow" doc:name="Look up idempotency key">
+                    <db:sql><![CDATA[SELECT request_hash, response_body FROM idempotency_keys WHERE idempotency_key = :key]]></db:sql>
+                    <db:input-parameters><![CDATA[#[{ key: vars.idemKey }]]]></db:input-parameters>
+                </db:select>
+                <choice doc:name="Key already used?">
+                    <when expression="#[sizeOf(vars.idemRow) == 0]">
+                        <set-variable variableName="idemState" value="NEW" doc:name="State NEW"/>
+                    </when>
+                    <when expression="#[vars.idemRow[0].request_hash != vars.requestHash]">
+                        <set-variable variableName="idemState" value="CONFLICT" doc:name="State CONFLICT"/>
+                        <logger level="WARN" message='#["Idempotency-Key reused with a different request, correlationId=" ++ vars.correlationId]' doc:name="Log key reuse"/>
+                        <ee:transform doc:name="Build 422 response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "IDEMPOTENCY_KEY_REUSED",
+  message: "This Idempotency-Key was already used with a different request. Use a new key for a new registration.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus">422</ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </when>
+                    <when expression="#[isEmpty(vars.idemRow[0].response_body)]">
+                        <set-variable variableName="idemState" value="IN_PROGRESS" doc:name="State IN_PROGRESS"/>
+                        <ee:transform doc:name="Build 409 response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "IDEMPOTENCY_KEY_IN_PROGRESS",
+  message: "A request with this Idempotency-Key is still being processed. Please retry shortly.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus">409</ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </when>
+                    <otherwise>
+                        <set-variable variableName="idemState" value="REPLAY" doc:name="State REPLAY"/>
+                        <logger level="INFO" message='#["Idempotent replay served from stored response, correlationId=" ++ vars.correlationId]' doc:name="Log replay"/>
+                        <ee:transform doc:name="Replay stored response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+read(vars.idemRow[0].response_body as String, "application/json")]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/java
+---
+if ((read(vars.idemRow[0].response_body as String, "application/json").code default "") == "PROVISIONING_FAILED") 500 else 201]]></ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </otherwise>
+                </choice>
+            </otherwise>
+        </choice>
+    </sub-flow>
+    <sub-flow name="create-customer-account">
+        <ee:transform doc:name="Generate IDs and token">
+            <ee:message/>
+            <ee:variables>
+                <ee:set-variable variableName="ids"><![CDATA[%dw 2.0
+import dw::Crypto
+import toHex from dw::core::Binaries
+output application/java
+var cleanName = upper(payload.company.companyName replace /[^A-Za-z0-9]/ with "")
+var prefix = if (sizeOf(cleanName) > 8) cleanName[0 to 7] else cleanName
+var rawToken = (uuid() ++ uuid()) replace /-/ with ""
+---
+{
+  customerId: "CUS-" ++ (now().year as String) ++ "-" ++ ((floor(random() * 900000) + 100000) as String),
+  tenantId: "TNT-" ++ prefix ++ "-" ++ upper(uuid()[0 to 3]),
+  userId: "USR-" ++ upper(uuid()[0 to 7]),
+  token: rawToken,
+  tokenHash: toHex(Crypto::hashWith(rawToken as Binary, "SHA-256")),
+  expiresAtIso: (now() + |PT24H|) as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+}]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <db:select config-ref="Database_Config" target="existingUsers" doc:name="Check duplicate email">
+            <db:sql><![CDATA[SELECT user_id FROM customer_users WHERE email = :email]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ email: lower(payload.primaryContact.email) }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Email already registered?">
+            <when expression="#[sizeOf(vars.existingUsers) > 0]">
+                <logger level="WARN" message='#["Duplicate registration rejected, correlationId=" ++ vars.correlationId]' doc:name="Log duplicate"/>
+                <ee:transform doc:name="Build 409 response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "DUPLICATE_EMAIL",
+  message: "An account already exists for this email. Please sign in or reset your password.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">409</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="accountCreated" value="#[false]" doc:name="Assume not created"/>
+                <try doc:name="Create account with error handling">
+                    <try doc:name="Create account (one transaction)" transactionalAction="ALWAYS_BEGIN" transactionType="LOCAL">
+                        <db:insert config-ref="Database_Config" target="insertResult" doc:name="Reserve idempotency key">
+                            <db:sql><![CDATA[INSERT INTO idempotency_keys (idempotency_key, request_hash) VALUES (:idempotencyKey, :requestHash)]]></db:sql>
+                            <db:input-parameters><![CDATA[#[{ idempotencyKey: vars.idemKey, requestHash: vars.requestHash }]]]></db:input-parameters>
+                        </db:insert>
+                        <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert customer">
+                            <db:sql><![CDATA[INSERT INTO customers (customer_id, tenant_id, company_name, industry, employee_count, gst_number, address_line1, city, state, postal_code, country, plan_code, seats, billing_currency, region, account_status, marketing_opt_in, terms_accepted_at, correlation_id) VALUES (:customerId, :tenantId, :companyName, :industry, :employeeCount, :gstNumber, :addressLine1, :city, :state, :postalCode, :country, :planCode, :seats, :billingCurrency, :region, :accountStatus, :marketingOptIn, :termsAcceptedAt, :correlationId)]]></db:sql>
+                            <db:input-parameters><![CDATA[#[{
+  customerId: vars.ids.customerId,
+  tenantId: vars.ids.tenantId,
+  companyName: payload.company.companyName,
+  industry: payload.company.industry,
+  employeeCount: payload.company.employeeCount,
+  gstNumber: payload.company.gstNumber,
+  addressLine1: payload.company.address.addressLine1,
+  city: payload.company.address.city,
+  state: payload.company.address.state,
+  postalCode: payload.company.address.postalCode,
+  country: payload.company.address.country,
+  planCode: payload.subscription.planCode,
+  seats: payload.subscription.seats,
+  billingCurrency: payload.subscription.billingCurrency,
+  region: payload.subscription.region,
+  accountStatus: "PENDING_VERIFICATION",
+  marketingOptIn: payload.consent.marketingOptIn default false,
+  termsAcceptedAt: (payload.consent.acceptedAt as DateTime) as String {format: "yyyy-MM-dd HH:mm:ss"},
+  correlationId: vars.correlationId
+}]]]></db:input-parameters>
+                        </db:insert>
+                        <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert primary user">
+                            <db:sql><![CDATA[INSERT INTO customer_users (user_id, customer_id, email, first_name, last_name, phone, job_title, user_role, user_status) VALUES (:userId, :customerId, :email, :firstName, :lastName, :phone, :jobTitle, :userRole, :userStatus)]]></db:sql>
+                            <db:input-parameters><![CDATA[#[{
+  userId: vars.ids.userId,
+  customerId: vars.ids.customerId,
+  email: lower(payload.primaryContact.email),
+  firstName: payload.primaryContact.firstName,
+  lastName: payload.primaryContact.lastName,
+  phone: payload.primaryContact.phone,
+  jobTitle: payload.primaryContact.jobTitle,
+  userRole: "PRIMARY_ADMIN",
+  userStatus: "PENDING"
+}]]]></db:input-parameters>
+                        </db:insert>
+                        <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert token hash">
+                            <db:sql><![CDATA[INSERT INTO verification_tokens (token_hash, customer_id, email, expires_at) VALUES (:tokenHash, :customerId, :email, DATE_ADD(NOW(), INTERVAL 24 HOUR))]]></db:sql>
+                            <db:input-parameters><![CDATA[#[{
+  tokenHash: vars.ids.tokenHash,
+  customerId: vars.ids.customerId,
+  email: lower(payload.primaryContact.email)
+}]]]></db:input-parameters>
+                        </db:insert>
+                    </try>
+                    <set-variable variableName="accountCreated" value="#[true]" doc:name="Account created"/>
+                    <error-handler>
+                        <on-error-continue>
+                            <logger level="WARN" message='#["Account creation failed and was rolled back, errorType=" ++ (error.errorType.namespace default "") ++ ":" ++ (error.errorType.identifier default "") ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log rollback"/>
+                            <ee:transform doc:name="Classify failure">
+                                <ee:message/>
+                                <ee:variables>
+                                    <ee:set-variable variableName="failure"><![CDATA[%dw 2.0
+output application/java
+var desc = error.description default ""
+---
+if (desc contains "Duplicate entry" and desc contains "idempotency_keys")
+  { status: 409, code: "IDEMPOTENCY_KEY_IN_PROGRESS", message: "A request with this Idempotency-Key is still being processed. Please retry shortly." }
+else if (desc contains "Duplicate entry" and desc contains "customer_users.email")
+  { status: 409, code: "DUPLICATE_EMAIL", message: "An account already exists for this email. Please sign in or reset your password." }
+else
+  { status: 500, code: "SYSTEM_ERROR", message: "We could not complete your registration. Please try again later." }]]></ee:set-variable>
+                                </ee:variables>
+                            </ee:transform>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+                <choice doc:name="Account created?">
+                    <when expression="#[vars.accountCreated]">
+                        <logger level="INFO" message='#["Customer created, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log customer created"/>
+                        <ee:transform doc:name="Build email body">
+                            <ee:message/>
+                            <ee:variables>
+                                <ee:set-variable variableName="emailBody" resource="dwl/welcomeEmail.dwl"/>
+                            </ee:variables>
+                        </ee:transform>
+                        <set-variable variableName="emailSent" value="#[false]" doc:name="Assume email not sent"/>
+                        <try doc:name="Send welcome email (failure must not fail registration)">
+                            <until-successful maxRetries="2" millisBetweenRetries="2000" doc:name="Retry email send">
+                                <email:send config-ref="SMTP_Config" fromAddress="no-reply@customer-onboarding.example.com" subject="Welcome to the platform – verify your account" doc:name="Send welcome email">
+                                    <email:to-addresses>
+                                        <email:to-address value="#[payload.primaryContact.email]"/>
+                                    </email:to-addresses>
+                                    <email:body contentType="text/plain" encoding="UTF-8">
+                                        <email:content><![CDATA[#[vars.emailBody]]]></email:content>
+                                    </email:body>
+                                </email:send>
+                            </until-successful>
+                            <set-variable variableName="emailSent" value="#[true]" doc:name="Email sent"/>
+                            <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email SENT">
+                                <db:sql><![CDATA[UPDATE customers SET email_status = 'SENT', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                            </db:update>
+                            <error-handler>
+                                <on-error-continue>
+                                    <logger level="WARN" message='#["Welcome email failed after retries, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log email failure"/>
+                                    <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email FAILED">
+                                        <db:sql><![CDATA[UPDATE customers SET email_status = 'FAILED', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                                    </db:update>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                        <ee:transform doc:name="Build provisioning event">
+                            <ee:message/>
+                            <ee:variables>
+                                <ee:set-variable variableName="provisioningEvent" resource="dwl/provisioningEvent.dwl"/>
+                            </ee:variables>
+                        </ee:transform>
+                        <set-variable variableName="provisioningOk" value="#[true]" doc:name="Assume provisioning queued"/>
+                        <try doc:name="Publish provisioning event (retry, then compensate)">
+                            <until-successful maxRetries="3" millisBetweenRetries="1000" doc:name="Retry publish">
+                                <vm:publish config-ref="VM_Config" queueName="${queue.publishName}" doc:name="Publish ACCOUNT_SETUP_REQUESTED">
+                                    <vm:content><![CDATA[#[vars.provisioningEvent]]]></vm:content>
+                                </vm:publish>
+                            </until-successful>
+                            <logger level="INFO" message='#["Provisioning event published, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log event published"/>
+                            <error-handler>
+                                <on-error-continue>
+                                    <set-variable variableName="provisioningOk" value="#[false]" doc:name="Provisioning failed"/>
+                                    <db:update config-ref="Database_Config" target="statusUpdateResult" doc:name="Mark PROVISIONING_FAILED">
+                                        <db:sql><![CDATA[UPDATE customers SET account_status = 'PROVISIONING_FAILED', updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                                    </db:update>
+                                    <logger level="ERROR" message='#["ALERT: PROVISIONING_FAILED, customerId=" ++ vars.ids.customerId ++ ", tenantId=" ++ vars.ids.tenantId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Internal alert"/>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                        <choice doc:name="Provisioning queued?">
+                            <when expression="#[vars.provisioningOk]">
+                                <ee:transform doc:name="Build 201 response">
+                                    <ee:message>
+                                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  customerId: vars.ids.customerId,
+  tenantId: vars.ids.tenantId,
+  accountStatus: "PENDING_VERIFICATION",
+  planCode: payload.subscription.planCode,
+  seats: payload.subscription.seats,
+  verificationEmailSent: vars.emailSent,
+  verificationExpiresAt: vars.ids.expiresAtIso,
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                                    </ee:message>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="httpStatus">201</ee:set-variable>
+                                    </ee:variables>
+                                </ee:transform>
+                            </when>
+                            <otherwise>
+                                <ee:transform doc:name="Build provisioning failure response">
+                                    <ee:message>
+                                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "PROVISIONING_FAILED",
+  message: "Your account was created but workspace setup could not be started. Our team has been notified.",
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                                    </ee:message>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+                                    </ee:variables>
+                                </ee:transform>
+                            </otherwise>
+                        </choice>
+                        <try doc:name="Store response for idempotent replay">
+                            <db:update config-ref="Database_Config" target="idemStoreResult" doc:name="Store response">
+                                <db:sql><![CDATA[UPDATE idempotency_keys SET response_body = :responseBody WHERE idempotency_key = :idempotencyKey]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{ responseBody: write(payload, "application/json"), idempotencyKey: vars.idemKey }]]]></db:input-parameters>
+                            </db:update>
+                            <error-handler>
+                                <on-error-continue>
+                                    <logger level="ERROR" message='#["Could not store idempotent response, correlationId=" ++ vars.correlationId]' doc:name="Log store failure"/>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                    </when>
+                    <otherwise>
+                        <ee:transform doc:name="Build failure response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: vars.failure.code,
+  message: vars.failure.message,
+  correlationId: vars.correlationId
+}]]></ee:set-payload>
+                            </ee:message>
+                            <ee:variables>
+                                <ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/java
+---
+vars.failure.status]]></ee:set-variable>
+                            </ee:variables>
+                        </ee:transform>
+                    </otherwise>
+                </choice>
+            </otherwise>
+        </choice>
     </sub-flow>
     <flow name="get:\customers\verify:customer-onboarding-config">
         <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
@@ -322,205 +724,143 @@ output application/json
                 </ee:transform>
             </when>
             <otherwise>
-                <ee:transform doc:name="Generate IDs and token">
-                    <ee:message/>
-                    <ee:variables>
-                        <ee:set-variable variableName="ids"><![CDATA[%dw 2.0
-import dw::Crypto
-import toHex from dw::core::Binaries
+                <flow-ref name="check-idempotency" doc:name="Check idempotency key"/>
+                <choice doc:name="New request?">
+                    <when expression="#[vars.idemState == 'NEW']">
+                        <flow-ref name="create-customer-account" doc:name="Create customer account"/>
+                    </when>
+                </choice>
+            </otherwise>
+        </choice>
+    </flow>
+    <flow name="post:\customers\resend-verification:application\json:customer-onboarding-config">
+        <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message='#["Resend verification requested, correlationId=" ++ vars.correlationId]' doc:name="Log resend request"/>
+        <ee:transform doc:name="Read email">
+            <ee:message/>
+            <ee:variables>
+                <ee:set-variable variableName="resendEmailAddress"><![CDATA[%dw 2.0
 output application/java
-var cleanName = upper(payload.company.companyName replace /[^A-Za-z0-9]/ with "")
-var prefix = if (sizeOf(cleanName) > 8) cleanName[0 to 7] else cleanName
-var rawToken = (uuid() ++ uuid()) replace /-/ with ""
 ---
-{
-  customerId: "CUS-" ++ (now().year as String) ++ "-" ++ ((floor(random() * 900000) + 100000) as String),
-  tenantId: "TNT-" ++ prefix ++ "-" ++ upper(uuid()[0 to 3]),
-  userId: "USR-" ++ upper(uuid()[0 to 7]),
-  token: rawToken,
-  tokenHash: toHex(Crypto::hashWith(rawToken as Binary, "SHA-256")),
-  expiresAtIso: (now() + |PT24H|) as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
-}]]></ee:set-variable>
-                    </ee:variables>
-                </ee:transform>
-                <db:select config-ref="Database_Config" target="existingUsers" doc:name="Check duplicate email">
-                    <db:sql><![CDATA[SELECT user_id FROM customer_users WHERE email = :email]]></db:sql>
-                    <db:input-parameters><![CDATA[#[{ email: lower(payload.primaryContact.email) }]]]></db:input-parameters>
-                </db:select>
-                <choice doc:name="Email already registered?">
-                    <when expression="#[sizeOf(vars.existingUsers) > 0]">
-                        <logger level="WARN" message='#["Duplicate registration rejected, correlationId=" ++ vars.correlationId]' doc:name="Log duplicate"/>
-                        <ee:transform doc:name="Build 409 response">
-                            <ee:message>
-                                <ee:set-payload><![CDATA[%dw 2.0
+if (payload.email is String) lower(trim(payload.email)) else ""]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <choice doc:name="Email valid?">
+            <when expression="#[not (vars.resendEmailAddress matches /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/)]">
+                <ee:transform doc:name="Build 400 response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
 output application/json
 ---
 {
-  code: "DUPLICATE_EMAIL",
-  message: "An account already exists for this email. Please sign in or reset your password.",
-  correlationId: vars.correlationId
+  code: "VALIDATION_ERROR",
+  message: "One or more fields are invalid",
+  correlationId: vars.correlationId,
+  errors: [{ field: "email", message: "A valid email address is required" }]
 }]]></ee:set-payload>
-                            </ee:message>
-                            <ee:variables>
-                                <ee:set-variable variableName="httpStatus">409</ee:set-variable>
-                            </ee:variables>
-                        </ee:transform>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <db:select config-ref="Database_Config" target="custRow" doc:name="Find account by email">
+                    <db:sql><![CDATA[SELECT u.customer_id, u.first_name, c.account_status, c.company_name FROM customer_users u JOIN customers c ON c.customer_id = u.customer_id WHERE u.email = :email]]></db:sql>
+                    <db:input-parameters><![CDATA[#[{ email: vars.resendEmailAddress }]]]></db:input-parameters>
+                </db:select>
+                <choice doc:name="Pending account found?">
+                    <when expression="#[sizeOf(vars.custRow) == 0 or vars.custRow[0].account_status != 'PENDING_VERIFICATION']">
+                        <logger level="INFO" message='#["Resend ignored: no pending account, correlationId=" ++ vars.correlationId]' doc:name="Log ignored"/>
+                        <flow-ref name="build-resend-accepted" doc:name="Build generic 202"/>
                     </when>
                     <otherwise>
-                        <try doc:name="Create account (one transaction)" transactionalAction="ALWAYS_BEGIN" transactionType="LOCAL">
-                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert customer">
-                                <db:sql><![CDATA[INSERT INTO customers (customer_id, tenant_id, company_name, industry, employee_count, gst_number, address_line1, city, state, postal_code, country, plan_code, seats, billing_currency, region, account_status, marketing_opt_in, terms_accepted_at, correlation_id) VALUES (:customerId, :tenantId, :companyName, :industry, :employeeCount, :gstNumber, :addressLine1, :city, :state, :postalCode, :country, :planCode, :seats, :billingCurrency, :region, :accountStatus, :marketingOptIn, :termsAcceptedAt, :correlationId)]]></db:sql>
-                                <db:input-parameters><![CDATA[#[{
-  customerId: vars.ids.customerId,
-  tenantId: vars.ids.tenantId,
-  companyName: payload.company.companyName,
-  industry: payload.company.industry,
-  employeeCount: payload.company.employeeCount,
-  gstNumber: payload.company.gstNumber,
-  addressLine1: payload.company.address.addressLine1,
-  city: payload.company.address.city,
-  state: payload.company.address.state,
-  postalCode: payload.company.address.postalCode,
-  country: payload.company.address.country,
-  planCode: payload.subscription.planCode,
-  seats: payload.subscription.seats,
-  billingCurrency: payload.subscription.billingCurrency,
-  region: payload.subscription.region,
-  accountStatus: "PENDING_VERIFICATION",
-  marketingOptIn: payload.consent.marketingOptIn default false,
-  termsAcceptedAt: (payload.consent.acceptedAt as DateTime) as String {format: "yyyy-MM-dd HH:mm:ss"},
-  correlationId: vars.correlationId
-}]]]></db:input-parameters>
-                            </db:insert>
-                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert primary user">
-                                <db:sql><![CDATA[INSERT INTO customer_users (user_id, customer_id, email, first_name, last_name, phone, job_title, user_role, user_status) VALUES (:userId, :customerId, :email, :firstName, :lastName, :phone, :jobTitle, :userRole, :userStatus)]]></db:sql>
-                                <db:input-parameters><![CDATA[#[{
-  userId: vars.ids.userId,
-  customerId: vars.ids.customerId,
-  email: lower(payload.primaryContact.email),
-  firstName: payload.primaryContact.firstName,
-  lastName: payload.primaryContact.lastName,
-  phone: payload.primaryContact.phone,
-  jobTitle: payload.primaryContact.jobTitle,
-  userRole: "PRIMARY_ADMIN",
-  userStatus: "PENDING"
-}]]]></db:input-parameters>
-                            </db:insert>
-                            <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert token hash">
-                                <db:sql><![CDATA[INSERT INTO verification_tokens (token_hash, customer_id, email, expires_at) VALUES (:tokenHash, :customerId, :email, DATE_ADD(NOW(), INTERVAL 24 HOUR))]]></db:sql>
-                                <db:input-parameters><![CDATA[#[{
-  tokenHash: vars.ids.tokenHash,
-  customerId: vars.ids.customerId,
-  email: lower(payload.primaryContact.email)
-}]]]></db:input-parameters>
-                            </db:insert>
-                        </try>
-                        <logger level="INFO" message='#["Customer created, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log customer created"/>
-                        <ee:transform doc:name="Build email body">
-                            <ee:message/>
-                            <ee:variables>
-                                <ee:set-variable variableName="emailBody" resource="dwl/welcomeEmail.dwl"/>
-                            </ee:variables>
-                        </ee:transform>
-                        <set-variable variableName="emailSent" value="#[false]" doc:name="Assume email not sent"/>
-                        <try doc:name="Send welcome email (failure must not fail registration)">
-                            <until-successful maxRetries="2" millisBetweenRetries="2000" doc:name="Retry email send">
-                                <email:send config-ref="SMTP_Config" fromAddress="no-reply@customer-onboarding.example.com" subject="Welcome to the platform – verify your account" doc:name="Send welcome email">
-                                    <email:to-addresses>
-                                        <email:to-address value="#[payload.primaryContact.email]"/>
-                                    </email:to-addresses>
-                                    <email:body contentType="text/plain" encoding="UTF-8">
-                                        <email:content><![CDATA[#[vars.emailBody]]]></email:content>
-                                    </email:body>
-                                </email:send>
-                            </until-successful>
-                            <set-variable variableName="emailSent" value="#[true]" doc:name="Email sent"/>
-                            <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email SENT">
-                                <db:sql><![CDATA[UPDATE customers SET email_status = 'SENT', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
-                                <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
-                            </db:update>
-                            <error-handler>
-                                <on-error-continue>
-                                    <logger level="WARN" message='#["Welcome email failed after retries, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log email failure"/>
-                                    <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email FAILED">
-                                        <db:sql><![CDATA[UPDATE customers SET email_status = 'FAILED', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
-                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
-                                    </db:update>
-                                </on-error-continue>
-                            </error-handler>
-                        </try>
-                        <ee:transform doc:name="Build provisioning event">
-                            <ee:message/>
-                            <ee:variables>
-                                <ee:set-variable variableName="provisioningEvent" resource="dwl/provisioningEvent.dwl"/>
-                            </ee:variables>
-                        </ee:transform>
-                        <set-variable variableName="provisioningOk" value="#[true]" doc:name="Assume provisioning queued"/>
-                        <try doc:name="Publish provisioning event (retry, then compensate)">
-                            <until-successful maxRetries="3" millisBetweenRetries="1000" doc:name="Retry publish">
-                                <vm:publish config-ref="VM_Config" queueName="${queue.publishName}" doc:name="Publish ACCOUNT_SETUP_REQUESTED">
-                                    <vm:content><![CDATA[#[vars.provisioningEvent]]]></vm:content>
-                                </vm:publish>
-                            </until-successful>
-                            <logger level="INFO" message='#["Provisioning event published, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log event published"/>
-                            <error-handler>
-                                <on-error-continue>
-                                    <set-variable variableName="provisioningOk" value="#[false]" doc:name="Provisioning failed"/>
-                                    <db:update config-ref="Database_Config" target="statusUpdateResult" doc:name="Mark PROVISIONING_FAILED">
-                                        <db:sql><![CDATA[UPDATE customers SET account_status = 'PROVISIONING_FAILED', updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
-                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
-                                    </db:update>
-                                    <logger level="ERROR" message='#["ALERT: PROVISIONING_FAILED, customerId=" ++ vars.ids.customerId ++ ", tenantId=" ++ vars.ids.tenantId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Internal alert"/>
-                                </on-error-continue>
-                            </error-handler>
-                        </try>
-                        <choice doc:name="Provisioning queued?">
-                            <when expression="#[vars.provisioningOk]">
-                                <ee:transform doc:name="Build 201 response">
+                        <db:select config-ref="Database_Config" target="cntRow" doc:name="Count recent tokens">
+                            <db:sql><![CDATA[SELECT COUNT(*) AS cnt FROM verification_tokens WHERE customer_id = :customerId AND expires_at > DATE_ADD(NOW(), INTERVAL 23 HOUR)]]></db:sql>
+                            <db:input-parameters><![CDATA[#[{ customerId: vars.custRow[0].customer_id }]]]></db:input-parameters>
+                        </db:select>
+                        <choice doc:name="Within rate limit?">
+                            <when expression="#[(vars.cntRow[0].cnt as Number) >= (p('resend.maxPerHour') as Number)]">
+                                <logger level="WARN" message='#["Resend rate limit reached, customerId=" ++ vars.custRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log rate limit"/>
+                                <ee:transform doc:name="Build 429 response">
                                     <ee:message>
                                         <ee:set-payload><![CDATA[%dw 2.0
 output application/json
 ---
 {
-  customerId: vars.ids.customerId,
-  tenantId: vars.ids.tenantId,
-  accountStatus: "PENDING_VERIFICATION",
-  planCode: payload.subscription.planCode,
-  seats: payload.subscription.seats,
-  verificationEmailSent: vars.emailSent,
-  verificationExpiresAt: vars.ids.expiresAtIso,
+  code: "RESEND_RATE_LIMITED",
+  message: "Too many verification emails were requested. Please try again later.",
   correlationId: vars.correlationId
 }]]></ee:set-payload>
                                     </ee:message>
                                     <ee:variables>
-                                        <ee:set-variable variableName="httpStatus">201</ee:set-variable>
+                                        <ee:set-variable variableName="httpStatus">429</ee:set-variable>
                                     </ee:variables>
                                 </ee:transform>
                             </when>
                             <otherwise>
-                                <ee:transform doc:name="Build provisioning failure response">
-                                    <ee:message>
-                                        <ee:set-payload><![CDATA[%dw 2.0
-output application/json
+                                <ee:transform doc:name="Generate new token">
+                                    <ee:message/>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="resend"><![CDATA[%dw 2.0
+import dw::Crypto
+import toHex from dw::core::Binaries
+output application/java
+var rawToken = (uuid() ++ uuid()) replace /-/ with ""
 ---
 {
-  code: "PROVISIONING_FAILED",
-  message: "Your account was created but workspace setup could not be started. Our team has been notified.",
-  correlationId: vars.correlationId
-}]]></ee:set-payload>
-                                    </ee:message>
-                                    <ee:variables>
-                                        <ee:set-variable variableName="httpStatus">500</ee:set-variable>
+  token: rawToken,
+  tokenHash: toHex(Crypto::hashWith(rawToken as Binary, "SHA-256")),
+  expiresAtIso: (now() + |PT24H|) as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+}]]></ee:set-variable>
                                     </ee:variables>
                                 </ee:transform>
+                                <db:insert config-ref="Database_Config" target="insertResult" doc:name="Insert new token hash">
+                                    <db:sql><![CDATA[INSERT INTO verification_tokens (token_hash, customer_id, email, expires_at) VALUES (:tokenHash, :customerId, :email, DATE_ADD(NOW(), INTERVAL 24 HOUR))]]></db:sql>
+                                    <db:input-parameters><![CDATA[#[{
+  tokenHash: vars.resend.tokenHash,
+  customerId: vars.custRow[0].customer_id,
+  email: vars.resendEmailAddress
+}]]]></db:input-parameters>
+                                </db:insert>
+                                <ee:transform doc:name="Build email body">
+                                    <ee:message/>
+                                    <ee:variables>
+                                        <ee:set-variable variableName="emailBody" resource="dwl/resendEmail.dwl"/>
+                                    </ee:variables>
+                                </ee:transform>
+                                <try doc:name="Send new verification email">
+                                    <until-successful maxRetries="2" millisBetweenRetries="2000" doc:name="Retry email send">
+                                        <email:send config-ref="SMTP_Config" fromAddress="no-reply@customer-onboarding.example.com" subject="Your new verification link" doc:name="Send new verification email">
+                                            <email:to-addresses>
+                                                <email:to-address value="#[vars.resendEmailAddress]"/>
+                                            </email:to-addresses>
+                                            <email:body contentType="text/plain" encoding="UTF-8">
+                                                <email:content><![CDATA[#[vars.emailBody]]]></email:content>
+                                            </email:body>
+                                        </email:send>
+                                    </until-successful>
+                                    <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email SENT">
+                                        <db:sql><![CDATA[UPDATE customers SET email_status = 'SENT', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.custRow[0].customer_id }]]]></db:input-parameters>
+                                    </db:update>
+                                    <logger level="INFO" message='#["Resend verification email sent, customerId=" ++ vars.custRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log resend sent"/>
+                                    <error-handler>
+                                        <on-error-continue>
+                                            <logger level="WARN" message='#["Resend verification email failed after retries, customerId=" ++ vars.custRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log resend failure"/>
+                                            <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email FAILED">
+                                                <db:sql><![CDATA[UPDATE customers SET email_status = 'FAILED', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                                <db:input-parameters><![CDATA[#[{ customerId: vars.custRow[0].customer_id }]]]></db:input-parameters>
+                                            </db:update>
+                                        </on-error-continue>
+                                    </error-handler>
+                                </try>
+                                <flow-ref name="build-resend-accepted" doc:name="Build 202 response"/>
                             </otherwise>
                         </choice>
                     </otherwise>
                 </choice>
             </otherwise>
         </choice>
-    </flow>
-    <flow name="post:\customers\resend-verification:application\json:customer-onboarding-config">
-        <logger level="INFO" message="post:\customers\resend-verification:application\json:customer-onboarding-config" />
     </flow>
 </mule>
