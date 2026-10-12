@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd  http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:email="http://www.mulesoft.org/schema/mule/email" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd  http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd">
     <http:listener-config name="customer-onboarding-httpListenerConfig">
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="ac5a6026-6aff-46bf-a813-29dc5507bb74" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="36582a3b-7c7b-4963-84b6-8a6db9ede943">
+    <configuration-properties doc:name="Configuration properties" doc:id="99b66de5-9985-4048-ae2e-660257694921" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="77022c0e-62cd-4bbd-8667-937406be025c">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
+    <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
+        <email:smtp-connection host="${smtp.host}" port="${smtp.port}" user="${smtp.user}" password="${smtp.password}" />
+    </email:smtp-config>
     <flow name="customer-onboarding-main">
         <http:listener config-ref="customer-onboarding-httpListenerConfig" path="/api/v1/*">
             <http:response statusCode="#[vars.httpStatus default 200]">
@@ -253,6 +256,39 @@ output application/json
                             </db:insert>
                         </try>
                         <logger level="INFO" message='#["Customer created, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log customer created"/>
+                        <ee:transform doc:name="Build email body">
+                            <ee:message/>
+                            <ee:variables>
+                                <ee:set-variable variableName="emailBody" resource="dwl/welcomeEmail.dwl"/>
+                            </ee:variables>
+                        </ee:transform>
+                        <set-variable variableName="emailSent" value="#[false]" doc:name="Assume email not sent"/>
+                        <try doc:name="Send welcome email (failure must not fail registration)">
+                            <until-successful maxRetries="2" millisBetweenRetries="2000" doc:name="Retry email send">
+                                <email:send config-ref="SMTP_Config" fromAddress="no-reply@customer-onboarding.example.com" subject="Welcome to the platform – verify your account" doc:name="Send welcome email">
+<email:to-addresses>
+    <email:to-address value="#[payload.primaryContact.email]"/>
+</email:to-addresses>
+                                    <email:body contentType="text/plain" encoding="UTF-8">
+                                        <email:content><![CDATA[#[vars.emailBody]]]></email:content>
+                                    </email:body>
+                                </email:send>
+                            </until-successful>
+                            <set-variable variableName="emailSent" value="#[true]" doc:name="Email sent"/>
+                            <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email SENT">
+                                <db:sql><![CDATA[UPDATE customers SET email_status = 'SENT', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                            </db:update>
+                            <error-handler>
+                                <on-error-continue>
+                                    <logger level="WARN" message='#["Welcome email failed after retries, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log email failure"/>
+                                    <db:update config-ref="Database_Config" target="emailStatusResult" doc:name="Mark email FAILED">
+                                        <db:sql><![CDATA[UPDATE customers SET email_status = 'FAILED', email_attempts = email_attempts + 1, updated_at = NOW() WHERE customer_id = :customerId]]></db:sql>
+                                        <db:input-parameters><![CDATA[#[{ customerId: vars.ids.customerId }]]]></db:input-parameters>
+                                    </db:update>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
                         <ee:transform doc:name="Build 201 response">
                             <ee:message>
                                 <ee:set-payload><![CDATA[%dw 2.0
@@ -264,7 +300,7 @@ output application/json
   accountStatus: "PENDING_VERIFICATION",
   planCode: payload.subscription.planCode,
   seats: payload.subscription.seats,
-  verificationEmailSent: false,
+  verificationEmailSent: vars.emailSent,
   verificationExpiresAt: vars.ids.expiresAtIso,
   correlationId: vars.correlationId
 }]]></ee:set-payload>
