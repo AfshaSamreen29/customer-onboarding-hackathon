@@ -1,0 +1,74 @@
+#%RAML 1.0
+title: Customer Onboarding API
+version: v1
+baseUri: http://localhost:8081/api
+mediaType: application/json
+
+types:
+  RegisterRequest:
+    type: object
+    properties:
+      name: string
+      email: string
+      password: string
+  LoginRequest:
+    type: object
+    properties:
+      email: string
+      password: string
+  Message:
+    type: object
+    properties:
+      message: string
+
+/register:
+  post:
+    description: Create a new customer account. A verification email is queued.
+    body:
+      application/json:
+        type: RegisterRequest
+    responses:
+      201:
+        body:
+          application/json:
+            type: Message
+      400:
+        body:
+          application/json:
+            type: Message
+      409:
+        body:
+          application/json:
+            type: Message
+
+/verify:
+  get:
+    description: Confirm an email address using the token sent by email.
+    queryParameters:
+      token:
+        type: string
+        required: true
+    responses:
+      200:
+        body:
+          application/json:
+            type: Message
+      400:
+        body:
+          application/json:
+            type: Message
+
+/login:
+  post:
+    body:
+      application/json:
+        type: LoginRequest
+    responses:
+      200:
+        body:
+          application/json:
+            type: Message
+      401:
+        body:
+          application/json:
+            type: Message
