@@ -1,0 +1,33 @@
+{
+  "company": {
+    "companyName": "Bright Analytics Pvt Ltd",
+    "industry": "PROFESSIONAL_SERVICES",
+    "employeeCount": 120,
+    "gstNumber": "33ABCDE1234F1Z5",
+    "address": {
+      "addressLine1": "14 Rajiv Gandhi Salai",
+      "city": "Chennai",
+      "state": "Tamil Nadu",
+      "postalCode": "600113",
+      "country": "India"
+    }
+  },
+  "primaryContact": {
+    "firstName": "Divya",
+    "lastName": "Srinivasan",
+    "email": "divya.srinivasan@brightanalytics.com",
+    "phone": "+91-9845012345",
+    "jobTitle": "Operations Head"
+  },
+  "subscription": {
+    "planCode": "GROWTH_ANNUAL",
+    "seats": 25,
+    "billingCurrency": "INR",
+    "region": "AP_SOUTH"
+  },
+  "consent": {
+    "termsAccepted": true,
+    "marketingOptIn": false,
+    "acceptedAt": "2026-09-11T11:05:00+05:30"
+  }
+}

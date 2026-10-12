@@ -131,8 +131,39 @@ output application/json
         <logger level="INFO" message="get:\customers\verify:customer-onboarding-config" />
     </flow>
     <flow name="post:\customers\register:application\json:customer-onboarding-config">
-        <logger level="INFO" message="post:\customers\register:application\json:customer-onboarding-config" />
-    </flow>
+    <set-variable variableName="correlationId" value="#[correlationId]" doc:name="Set correlationId"/>
+    <logger level="INFO" message='#["Registration request received, correlationId=" ++ vars.correlationId]' doc:name="Log request received"/>
+    <ee:transform doc:name="Validate fields">
+        <ee:message/>
+        <ee:variables>
+            <ee:set-variable variableName="validationErrors" resource="dwl/validateRegistration.dwl"/>
+        </ee:variables>
+    </ee:transform>
+    <choice doc:name="Any validation errors?">
+        <when expression="#[sizeOf(vars.validationErrors) > 0]">
+            <ee:transform doc:name="Build 400 response">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  code: "VALIDATION_ERROR",
+  message: "One or more fields are invalid",
+  correlationId: vars.correlationId,
+  errors: vars.validationErrors
+}]]></ee:set-payload>
+                </ee:message>
+                <ee:variables>
+                    <ee:set-variable variableName="httpStatus">400</ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+        </when>
+        <otherwise>
+            <set-payload value='#[output application/json --- {message: "Validation passed (database step not built yet)", correlationId: vars.correlationId}]' doc:name="Temporary success"/>
+            <set-variable variableName="httpStatus" value="#[201]" doc:name="Set status 201"/>
+        </otherwise>
+    </choice>
+</flow>
     <flow name="post:\customers\resend-verification:application\json:customer-onboarding-config">
         <logger level="INFO" message="post:\customers\resend-verification:application\json:customer-onboarding-config" />
     </flow>
