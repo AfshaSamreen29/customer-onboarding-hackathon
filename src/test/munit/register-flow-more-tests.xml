@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:munit="http://www.mulesoft.org/schema/mule/munit" xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+    <munit:config name="register-flow-more-tests.xml" />
+
+    <flow name="mock-replay-row">
+        <ee:transform doc:name="Build stored row that matches the incoming request">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+[{
+  request_hash: vars.requestHash,
+  response_body: '{"customerId":"CUS-2026-111111","tenantId":"TNT-TEST-0001","accountStatus":"PENDING_VERIFICATION","planCode":"GROWTH_ANNUAL","seats":25,"verificationEmailSent":true,"verificationExpiresAt":"2026-10-14T10:00:00+05:30","correlationId":"stored-correlation-id"}'
+}]]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <munit:test name="register-missing-idempotency-key-returns-400" description="A missing Idempotency-Key header is rejected before any database work">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('IDEMPOTENCY_KEY_INVALID')]" message="Expected IDEMPOTENCY_KEY_INVALID"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-success-returns-201-and-publishes-event" description="Happy path: account created, email sent, provisioning event published once">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(201)]" message="Expected HTTP 201"/>
+            <munit-tools:assert-that expression="#[payload.accountStatus]" is="#[MunitTools::equalTo('PENDING_VERIFICATION')]" message="Expected PENDING_VERIFICATION"/>
+            <munit-tools:assert-that expression="#[payload.customerId startsWith 'CUS-']" is="#[MunitTools::equalTo(true)]" message="Expected a customer ID"/>
+            <munit-tools:assert-that expression="#[payload.tenantId startsWith 'TNT-']" is="#[MunitTools::equalTo(true)]" message="Expected a tenant ID"/>
+            <munit-tools:assert-that expression="#[payload.verificationEmailSent]" is="#[MunitTools::equalTo(true)]" message="Expected the email to be reported as sent"/>
+            <munit-tools:verify-call processor="email:send" times="1"/>
+            <munit-tools:verify-call processor="vm:publish" times="1"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-duplicate-email-returns-409" description="An existing email returns 409 and nothing is created, emailed or queued">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{user_id: 'USR-EXISTING'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(409)]" message="Expected HTTP 409"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('DUPLICATE_EMAIL')]" message="Expected DUPLICATE_EMAIL"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-idempotent-replay-returns-stored-response" description="Same key and same request returns the stored original response and creates nothing new">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-call flow="mock-replay-row"/>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(201)]" message="Expected the original HTTP 201"/>
+            <munit-tools:assert-that expression="#[payload.customerId]" is="#[MunitTools::equalTo('CUS-2026-111111')]" message="Expected the stored customer ID"/>
+            <munit-tools:assert-that expression="#[payload.correlationId]" is="#[MunitTools::equalTo('stored-correlation-id')]" message="Expected the stored correlation ID"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-same-key-different-request-returns-422" description="Reusing an Idempotency-Key with a different request returns 422">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{request_hash: 'some-other-request-hash', response_body: '{}'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(422)]" message="Expected HTTP 422"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('IDEMPOTENCY_KEY_REUSED')]" message="Expected IDEMPOTENCY_KEY_REUSED"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-queue-failure-marks-provisioning-failed" description="If the provisioning event cannot be published after retries the account is marked PROVISIONING_FAILED and success is not reported">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="MULE:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(500)]" message="Expected HTTP 500"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('PROVISIONING_FAILED')]" message="Expected PROVISIONING_FAILED"/>
+            <munit-tools:verify-call processor="db:update" times="1">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Mark PROVISIONING_FAILED"/>
+                </munit-tools:with-attributes>
+            </munit-tools:verify-call>
+        </munit:validation>
+    </munit:test>
+</mule>

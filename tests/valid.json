@@ -21,7 +21,7 @@
   },
   "subscription": {
     "planCode": "GROWTH_ANNUAL",
-    "seats": 30,
+    "seats": 25,
     "billingCurrency": "INR",
     "region": "AP_SOUTH"
   },

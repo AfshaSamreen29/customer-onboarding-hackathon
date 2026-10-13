@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:munit="http://www.mulesoft.org/schema/mule/munit" xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+    <munit:config name="register-flow-test-suite.xml" />
+
+    <munit:test name="register-validation-errors-return-400-with-all-errors" description="Invalid payload returns HTTP 400 with every field error in one response; nothing is created">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://bad.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('VALIDATION_ERROR')]" message="Expected VALIDATION_ERROR"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+        </munit:validation>
+    </munit:test>
+</mule>

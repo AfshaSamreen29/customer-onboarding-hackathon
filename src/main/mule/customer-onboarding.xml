@@ -4,8 +4,8 @@
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="5d85e1b0-aafd-4e88-9b85-713f88620944" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="1558073a-bc51-41a3-b9af-fc82aa369020">
+    <configuration-properties doc:name="Configuration properties" doc:id="f21c270e-9cc1-4904-a0d7-382055a35fd3" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="dc43ffb5-5ed2-4f41-9ce2-7f1252f8f286">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
@@ -241,10 +241,13 @@ output application/json
                 </ee:transform>
             </when>
             <otherwise>
-                <db:select config-ref="Database_Config" target="idemRow" doc:name="Look up idempotency key">
+                <set-variable variableName="savedPayload" value="#[payload]" doc:name="Save request payload"/>
+                <db:select config-ref="Database_Config" doc:name="Look up idempotency key">
                     <db:sql><![CDATA[SELECT request_hash, response_body FROM idempotency_keys WHERE idempotency_key = :key]]></db:sql>
                     <db:input-parameters><![CDATA[#[{ key: vars.idemKey }]]]></db:input-parameters>
                 </db:select>
+                <set-variable variableName="idemRow" value="#[payload]" doc:name="Keep lookup result"/>
+                <set-payload value="#[vars.savedPayload]" doc:name="Restore request payload"/>
                 <choice doc:name="Key already used?">
                     <when expression="#[sizeOf(vars.idemRow) == 0]">
                         <set-variable variableName="idemState" value="NEW" doc:name="State NEW"/>
@@ -330,10 +333,13 @@ var rawToken = (uuid() ++ uuid()) replace /-/ with ""
 }]]></ee:set-variable>
             </ee:variables>
         </ee:transform>
-        <db:select config-ref="Database_Config" target="existingUsers" doc:name="Check duplicate email">
+        <set-variable variableName="savedPayload" value="#[payload]" doc:name="Save request payload"/>
+        <db:select config-ref="Database_Config" doc:name="Check duplicate email">
             <db:sql><![CDATA[SELECT user_id FROM customer_users WHERE email = :email]]></db:sql>
-            <db:input-parameters><![CDATA[#[{ email: lower(payload.primaryContact.email) }]]]></db:input-parameters>
+            <db:input-parameters><![CDATA[#[{ email: lower(vars.savedPayload.primaryContact.email) }]]]></db:input-parameters>
         </db:select>
+        <set-variable variableName="existingUsers" value="#[payload]" doc:name="Keep duplicate-email result"/>
+        <set-payload value="#[vars.savedPayload]" doc:name="Restore request payload"/>
         <choice doc:name="Email already registered?">
             <when expression="#[sizeOf(vars.existingUsers) > 0]">
                 <logger level="WARN" message='#["Duplicate registration rejected, correlationId=" ++ vars.correlationId]' doc:name="Log duplicate"/>
@@ -432,6 +438,7 @@ else
                 </try>
                 <choice doc:name="Account created?">
                     <when expression="#[vars.accountCreated]">
+                        <set-payload value="#[vars.savedPayload]" doc:name="Restore request payload"/>
                         <logger level="INFO" message='#["Customer created, customerId=" ++ vars.ids.customerId ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log customer created"/>
                         <ee:transform doc:name="Build email body">
                             <ee:message/>
@@ -466,6 +473,7 @@ else
                                 </on-error-continue>
                             </error-handler>
                         </try>
+                        <set-payload value="#[vars.savedPayload]" doc:name="Restore request payload"/>
                         <ee:transform doc:name="Build provisioning event">
                             <ee:message/>
                             <ee:variables>
@@ -491,6 +499,7 @@ else
                                 </on-error-continue>
                             </error-handler>
                         </try>
+                        <set-payload value="#[vars.savedPayload]" doc:name="Restore request payload"/>
                         <choice doc:name="Provisioning queued?">
                             <when expression="#[vars.provisioningOk]">
                                 <ee:transform doc:name="Build 201 response">
@@ -532,6 +541,7 @@ output application/json
                                 </ee:transform>
                             </otherwise>
                         </choice>
+                        <set-variable variableName="finalResponse" value="#[payload]" doc:name="Keep final response"/>
                         <try doc:name="Store response for idempotent replay">
                             <db:update config-ref="Database_Config" target="idemStoreResult" doc:name="Store response">
                                 <db:sql><![CDATA[UPDATE idempotency_keys SET response_body = :responseBody WHERE idempotency_key = :idempotencyKey]]></db:sql>
@@ -543,6 +553,7 @@ output application/json
                                 </on-error-continue>
                             </error-handler>
                         </try>
+                        <set-payload value="#[vars.finalResponse]" doc:name="Restore final response"/>
                     </when>
                     <otherwise>
                         <ee:transform doc:name="Build failure response">
@@ -590,10 +601,13 @@ output application/java
 toHex(Crypto::hashWith(vars.tokenParam as Binary, "SHA-256"))]]></ee:set-variable>
                     </ee:variables>
                 </ee:transform>
-                <db:select config-ref="Database_Config" target="tokenRow" doc:name="Find token by hash">
+                <set-variable variableName="savedPayload" value="#[payload]" doc:name="Save payload"/>
+                <db:select config-ref="Database_Config" doc:name="Find token by hash">
                     <db:sql><![CDATA[SELECT t.customer_id, t.consumed_at, CASE WHEN t.expires_at <= NOW() THEN 1 ELSE 0 END AS is_expired, c.account_status FROM verification_tokens t JOIN customers c ON c.customer_id = t.customer_id WHERE t.token_hash = :tokenHash]]></db:sql>
                     <db:input-parameters><![CDATA[#[{ tokenHash: vars.tokenHash }]]]></db:input-parameters>
                 </db:select>
+                <set-variable variableName="tokenRow" value="#[payload]" doc:name="Keep token result"/>
+                <set-payload value="#[vars.savedPayload]" doc:name="Restore payload"/>
                 <choice doc:name="Token state">
                     <when expression="#[sizeOf(vars.tokenRow) == 0]">
                         <logger level="WARN" message='#["Verification rejected: unknown token, correlationId=" ++ vars.correlationId]' doc:name="Log unknown"/>
@@ -643,10 +657,12 @@ toHex(Crypto::hashWith(vars.tokenParam as Binary, "SHA-256"))]]></ee:set-variabl
                         <choice doc:name="Activated?">
                             <when expression="#[vars.activated]">
                                 <logger level="INFO" message='#["Account activated, customerId=" ++ vars.tokenRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log activated"/>
-                                <db:select config-ref="Database_Config" target="customerRow" doc:name="Load customer for event">
+                                <db:select config-ref="Database_Config" doc:name="Load customer for event">
                                     <db:sql><![CDATA[SELECT c.customer_id, c.tenant_id, c.company_name, c.plan_code, c.seats, c.region, u.email FROM customers c JOIN customer_users u ON u.customer_id = c.customer_id WHERE c.customer_id = :customerId]]></db:sql>
                                     <db:input-parameters><![CDATA[#[{ customerId: vars.tokenRow[0].customer_id }]]]></db:input-parameters>
                                 </db:select>
+                                <set-variable variableName="customerRow" value="#[payload]" doc:name="Keep customer result"/>
+                                <set-payload value="#[vars.savedPayload]" doc:name="Restore payload"/>
                                 <ee:transform doc:name="Build activation event">
                                     <ee:message/>
                                     <ee:variables>
@@ -765,20 +781,25 @@ output application/json
                 </ee:transform>
             </when>
             <otherwise>
-                <db:select config-ref="Database_Config" target="custRow" doc:name="Find account by email">
+                <set-variable variableName="savedPayload" value="#[payload]" doc:name="Save payload"/>
+                <db:select config-ref="Database_Config" doc:name="Find account by email">
                     <db:sql><![CDATA[SELECT u.customer_id, u.first_name, c.account_status, c.company_name FROM customer_users u JOIN customers c ON c.customer_id = u.customer_id WHERE u.email = :email]]></db:sql>
                     <db:input-parameters><![CDATA[#[{ email: vars.resendEmailAddress }]]]></db:input-parameters>
                 </db:select>
+                <set-variable variableName="custRow" value="#[payload]" doc:name="Keep account result"/>
+                <set-payload value="#[vars.savedPayload]" doc:name="Restore payload"/>
                 <choice doc:name="Pending account found?">
                     <when expression="#[sizeOf(vars.custRow) == 0 or vars.custRow[0].account_status != 'PENDING_VERIFICATION']">
                         <logger level="INFO" message='#["Resend ignored: no pending account, correlationId=" ++ vars.correlationId]' doc:name="Log ignored"/>
                         <flow-ref name="build-resend-accepted" doc:name="Build generic 202"/>
                     </when>
                     <otherwise>
-                        <db:select config-ref="Database_Config" target="cntRow" doc:name="Count recent tokens">
+                        <db:select config-ref="Database_Config" doc:name="Count recent tokens">
                             <db:sql><![CDATA[SELECT COUNT(*) AS cnt FROM verification_tokens WHERE customer_id = :customerId AND expires_at > DATE_ADD(NOW(), INTERVAL 23 HOUR)]]></db:sql>
                             <db:input-parameters><![CDATA[#[{ customerId: vars.custRow[0].customer_id }]]]></db:input-parameters>
                         </db:select>
+                        <set-variable variableName="cntRow" value="#[payload]" doc:name="Keep count result"/>
+                        <set-payload value="#[vars.savedPayload]" doc:name="Restore payload"/>
                         <choice doc:name="Within rate limit?">
                             <when expression="#[(vars.cntRow[0].cnt as Number) >= (p('resend.maxPerHour') as Number)]">
                                 <logger level="WARN" message='#["Resend rate limit reached, customerId=" ++ vars.custRow[0].customer_id ++ ", correlationId=" ++ vars.correlationId]' doc:name="Log rate limit"/>

@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <classpath>
+	<classpathentry kind="con" path="org.mule.tooling.MULE_PROJECT_LIB"/>
+	<classpathentry kind="con" path="MULE_LIB/com.mulesoft.munit/munit-tools/3.7.3"/>
+	<classpathentry kind="con" path="MULE_LIB/com.mulesoft.munit/munit-runner/3.7.3"/>
 	<classpathentry kind="con" path="MULE_LIB/org.mule.connectors/mule-vm-connector/2.0.1"/>
 	<classpathentry kind="con" path="MULE_LIB/org.mule.connectors/mule-email-connector/1.8.0"/>
-	<classpathentry kind="con" path="org.mule.tooling.MULE_PROJECT_LIB"/>
 	<classpathentry kind="con" path="MULE_LIB/org.mule.connectors/mule-db-connector/1.16.1"/>
 	<classpathentry kind="con" path="MULE_LIB/org.mule.modules/mule-apikit-module/1.12.0"/>
 	<classpathentry kind="con" path="MULE_LIB/org.mule.connectors/mule-sockets-connector/1.2.7"/>

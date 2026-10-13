@@ -1,0 +1,6 @@
+{
+  "company": { "companyName": "", "address": { "country": "Atlantis" } },
+  "primaryContact": { "firstName": "Divya", "lastName": "S", "email": "not-an-email", "phone": "abc" },
+  "subscription": { "planCode": "GOLD", "seats": 0, "billingCurrency": "INR", "region": "MARS" },
+  "consent": { "termsAccepted": false, "marketingOptIn": false, "acceptedAt": "2026-09-11T11:05:00+05:30" }
+}
