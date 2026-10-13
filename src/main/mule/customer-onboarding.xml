@@ -4,8 +4,8 @@
         <http:listener-connection host="0.0.0.0" port="8081" />
     </http:listener-config>
     <apikit:config name="customer-onboarding-config" api="customer-onboarding.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
-    <configuration-properties doc:name="Configuration properties" doc:id="f21c270e-9cc1-4904-a0d7-382055a35fd3" file="config.properties" />
-    <db:config name="Database_Config" doc:name="Database Config" doc:id="dc43ffb5-5ed2-4f41-9ce2-7f1252f8f286">
+    <configuration-properties doc:name="Configuration properties" doc:id="3dcab7ce-38d2-42b6-9918-4307e1c87440" file="config.properties" />
+    <db:config name="Database_Config" doc:name="Database Config" doc:id="51a2daf9-1f29-4dad-8b79-983a7e7450f7">
         <db:my-sql-connection host="${db.host}" port="${db.port}" user="${db.user}" password="${db.password}" database="${db.name}" />
     </db:config>
     <email:smtp-config name="SMTP_Config" doc:name="Email SMTP Config">
@@ -425,9 +425,9 @@ output application/json
 output application/java
 var desc = error.description default ""
 ---
-if (desc contains "Duplicate entry" and desc contains "idempotency_keys")
+if ((desc contains "Duplicate entry") and (desc contains "idempotency_keys"))
   { status: 409, code: "IDEMPOTENCY_KEY_IN_PROGRESS", message: "A request with this Idempotency-Key is still being processed. Please retry shortly." }
-else if (desc contains "Duplicate entry" and desc contains "customer_users.email")
+else if ((desc contains "Duplicate entry") and (desc contains "customer_users.email"))
   { status: 409, code: "DUPLICATE_EMAIL", message: "An account already exists for this email. Please sign in or reset your password." }
 else
   { status: 500, code: "SYSTEM_ERROR", message: "We could not complete your registration. Please try again later." }]]></ee:set-variable>
@@ -636,10 +636,11 @@ toHex(Crypto::hashWith(vars.tokenParam as Binary, "SHA-256"))]]></ee:set-variabl
                     <otherwise>
                         <set-variable variableName="activated" value="#[false]" doc:name="Assume not activated"/>
                         <try doc:name="Consume token and activate (one transaction)" transactionalAction="ALWAYS_BEGIN" transactionType="LOCAL">
-                            <db:update config-ref="Database_Config" target="consumeResult" doc:name="Consume token once">
+                            <db:update config-ref="Database_Config" doc:name="Consume token once">
                                 <db:sql><![CDATA[UPDATE verification_tokens SET consumed_at = NOW(), attempts = attempts + 1 WHERE token_hash = :tokenHash AND consumed_at IS NULL AND expires_at > NOW()]]></db:sql>
                                 <db:input-parameters><![CDATA[#[{ tokenHash: vars.tokenHash }]]]></db:input-parameters>
                             </db:update>
+                            <set-variable variableName="consumeResult" value="#[payload]" doc:name="Keep consume result"/>
                             <choice doc:name="Token consumed by this request?">
                                 <when expression="#[vars.consumeResult.affectedRows == 1]">
                                     <db:update config-ref="Database_Config" target="customerUpdate" doc:name="Activate customer">
@@ -844,6 +845,7 @@ var rawToken = (uuid() ++ uuid()) replace /-/ with ""
   email: vars.resendEmailAddress
 }]]]></db:input-parameters>
                                 </db:insert>
+                                <set-payload value="#[vars.savedPayload]" doc:name="Restore payload"/>
                                 <ee:transform doc:name="Build email body">
                                     <ee:message/>
                                     <ee:variables>

@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:munit="http://www.mulesoft.org/schema/mule/munit" xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+    <munit:config name="register-flow-failure-paths-tests.xml" />
+
+    <munit:test name="register-terms-not-accepted-returns-400-and-creates-nothing" description="Terms acceptance false is rejected and no record, email or event is created">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- (readUrl('classpath://valid.json', 'application/json')) update { case .consent.termsAccepted -> false }]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('VALIDATION_ERROR')]" message="Expected VALIDATION_ERROR"/>
+            <munit-tools:assert-that expression="#[sizeOf(payload.errors) > 0]" is="#[MunitTools::equalTo(true)]" message="Expected at least one field error"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-missing-mandatory-fields-returns-all-errors-in-one-response" description="Several missing mandatory fields are all reported together in a single 400">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- (readUrl('classpath://valid.json', 'application/json')) update { case c at .company -> c - 'companyName' case p at .primaryContact -> p - 'email' case s at .subscription -> s - 'planCode' }]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('VALIDATION_ERROR')]" message="Expected VALIDATION_ERROR"/>
+            <munit-tools:assert-that expression="#[sizeOf(payload.errors) >= 3]" is="#[MunitTools::equalTo(true)]" message="Expected every missing field to be reported"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-database-failure-returns-500-and-creates-nothing" description="A database failure during account creation returns a safe 500 and no email or event is produced">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="DB:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(500)]" message="Expected HTTP 500"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('SYSTEM_ERROR')]" message="Expected SYSTEM_ERROR"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-email-failure-keeps-account-and-returns-201" description="If the welcome email cannot be sent the account stays valid, the email is marked FAILED and 201 is returned">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="MULE:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(201)]" message="Expected HTTP 201"/>
+            <munit-tools:assert-that expression="#[payload.verificationEmailSent]" is="#[MunitTools::equalTo(false)]" message="Expected verificationEmailSent to be false"/>
+            <munit-tools:assert-that expression="#[payload.accountStatus]" is="#[MunitTools::equalTo('PENDING_VERIFICATION')]" message="Expected PENDING_VERIFICATION"/>
+            <munit-tools:verify-call processor="db:update" times="1">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Mark email FAILED"/>
+                </munit-tools:with-attributes>
+            </munit-tools:verify-call>
+            <munit-tools:verify-call processor="vm:publish" times="1"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="register-success-builds-correct-email-and-provisioning-event" description="The welcome email has no unresolved placeholders and carries a link, and the provisioning event has the agreed structure">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Look up idempotency key"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Check duplicate email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- readUrl('classpath://valid.json', 'application/json')]" encoding="UTF-8" mediaType="application/json"/>
+                <munit:attributes value="#[{headers: {'idempotency-key': 'unit-test-key-001'}}]"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\register:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(201)]" message="Expected HTTP 201"/>
+            <munit-tools:assert-that expression="#[vars.emailBody as String]" is="#[MunitTools::not(MunitTools::containsString('{{'))]" message="Email must not contain unresolved placeholders"/>
+            <munit-tools:assert-that expression="#[vars.emailBody as String]" is="#[MunitTools::containsString('token=')]" message="Email must contain the verification link"/>
+            <munit-tools:assert-that expression="#[vars.emailBody as String]" is="#[MunitTools::containsString('Dear ')]" message="Email must greet the contact"/>
+            <munit-tools:assert-that expression="#[vars.provisioningEvent.eventType]" is="#[MunitTools::equalTo('ACCOUNT_SETUP_REQUESTED')]" message="Expected ACCOUNT_SETUP_REQUESTED"/>
+            <munit-tools:assert-that expression="#[sizeOf(vars.provisioningEvent.payload.entitlements)]" is="#[MunitTools::greaterThan(0)]" message="Expected entitlements"/>
+            <munit-tools:assert-that expression="#[vars.provisioningEvent.payload.tenantId]" is="#[MunitTools::startsWith('TNT-')]" message="Expected a tenant ID"/>
+            <munit-tools:verify-call processor="vm:publish" times="1"/>
+        </munit:validation>
+    </munit:test>
+</mule>

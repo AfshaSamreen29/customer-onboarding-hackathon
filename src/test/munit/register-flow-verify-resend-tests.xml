@@ -1,0 +1,517 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:munit="http://www.mulesoft.org/schema/mule/munit" xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+    <munit:config name="register-flow-verify-resend-tests.xml" />
+
+    <munit:test name="verify-missing-token-returns-400" description="A missing token is rejected before any database work">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('TOKEN_MISSING')]" message="Expected TOKEN_MISSING"/>
+            <munit-tools:verify-call processor="db:select" times="0"/>
+            <munit-tools:verify-call processor="db:update" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-unknown-token-returns-400" description="A token that does not exist returns TOKEN_INVALID">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'unknown-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('TOKEN_INVALID')]" message="Expected TOKEN_INVALID"/>
+            <munit-tools:verify-call processor="db:update" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-used-token-returns-400" description="A token that was already consumed returns TOKEN_ALREADY_USED">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: '2026-10-13 10:00:00', is_expired: 0, account_status: 'PENDING_VERIFICATION'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'used-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('TOKEN_ALREADY_USED')]" message="Expected TOKEN_ALREADY_USED"/>
+            <munit-tools:verify-call processor="db:update" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-expired-token-returns-400-with-resend-path" description="An expired token returns TOKEN_EXPIRED and points to the resend endpoint">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: null, is_expired: 1, account_status: 'PENDING_VERIFICATION'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'expired-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('TOKEN_EXPIRED')]" message="Expected TOKEN_EXPIRED"/>
+            <munit-tools:assert-that expression="#[payload.resendPath]" is="#[MunitTools::equalTo('/api/v1/customers/resend-verification')]" message="Expected the resend path"/>
+            <munit-tools:verify-call processor="db:update" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-account-not-pending-returns-400" description="A token for an account that is not pending is rejected">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: null, is_expired: 0, account_status: 'ACTIVE'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'active-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('ACCOUNT_NOT_PENDING')]" message="Expected ACCOUNT_NOT_PENDING"/>
+            <munit-tools:verify-call processor="db:update" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-success-activates-account-and-publishes-event" description="A valid token activates the account and publishes the activation event once">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: null, is_expired: 0, account_status: 'PENDING_VERIFICATION'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Load customer for event"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', tenant_id: 'TNT-ACME-0001', company_name: 'Acme Test Pvt Ltd', plan_code: 'GROWTH_ANNUAL', seats: 25, region: 'IN', email: 'pending.user@example.com'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'valid-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(200)]" message="Expected HTTP 200"/>
+            <munit-tools:assert-that expression="#[payload.accountStatus]" is="#[MunitTools::equalTo('ACTIVE')]" message="Expected ACTIVE"/>
+            <munit-tools:assert-that expression="#[payload.customerId]" is="#[MunitTools::equalTo('CUS-2026-222222')]" message="Expected the customer ID"/>
+            <munit-tools:verify-call processor="db:update" times="3"/>
+            <munit-tools:verify-call processor="vm:publish" times="1"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-token-consumed-by-another-request-returns-400" description="If another request consumed the token first (0 rows updated) nothing is activated">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: null, is_expired: 0, account_status: 'PENDING_VERIFICATION'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 0}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['published']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'race-token-123'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('TOKEN_ALREADY_USED')]" message="Expected TOKEN_ALREADY_USED"/>
+            <munit-tools:verify-call processor="vm:publish" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="verify-activation-event-failure-still-returns-200" description="If the activation event cannot be published the account is still activated and 200 is returned">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find token by hash"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', consumed_at: null, is_expired: 0, account_status: 'PENDING_VERIFICATION'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Load customer for event"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', tenant_id: 'TNT-ACME-0001', company_name: 'Acme Test Pvt Ltd', plan_code: 'GROWTH_ANNUAL', seats: 25, region: 'IN', email: 'pending.user@example.com'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vm:publish">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="MULE:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:attributes value="#[{queryParams: {token: 'valid-token-456'}}]"/>
+            </munit:set-event>
+            <flow-ref name="get:\customers\verify:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(200)]" message="Expected HTTP 200"/>
+            <munit-tools:assert-that expression="#[payload.accountStatus]" is="#[MunitTools::equalTo('ACTIVE')]" message="Expected ACTIVE"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-invalid-email-returns-400" description="An invalid email is rejected before any database work">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'not-an-email'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(400)]" message="Expected HTTP 400"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('VALIDATION_ERROR')]" message="Expected VALIDATION_ERROR"/>
+            <munit-tools:verify-call processor="db:select" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-unknown-email-returns-generic-202" description="An unknown email gets the same 202 and nothing is sent (no account enumeration)">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find account by email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- []]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'nobody@example.com'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(202)]" message="Expected HTTP 202"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-active-account-returns-generic-202" description="An account that is already active gets the same 202 and nothing is sent">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find account by email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', first_name: 'Asha', account_status: 'ACTIVE', company_name: 'Acme Test Pvt Ltd'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'active.user@example.com'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(202)]" message="Expected HTTP 202"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-rate-limited-returns-429" description="Too many recent resend requests return 429 and nothing is sent">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find account by email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', first_name: 'Asha', account_status: 'PENDING_VERIFICATION', company_name: 'Acme Test Pvt Ltd'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Count recent tokens"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{cnt: 999}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'pending.user@example.com'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(429)]" message="Expected HTTP 429"/>
+            <munit-tools:assert-that expression="#[payload.code]" is="#[MunitTools::equalTo('RESEND_RATE_LIMITED')]" message="Expected RESEND_RATE_LIMITED"/>
+            <munit-tools:verify-call processor="db:insert" times="0"/>
+            <munit-tools:verify-call processor="email:send" times="0"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-success-sends-new-link-and-returns-202" description="A pending account gets a new token and email, and a 202 is returned">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find account by email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', first_name: 'Asha', account_status: 'PENDING_VERIFICATION', company_name: 'Acme Test Pvt Ltd'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Count recent tokens"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{cnt: 0}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#['sent']"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'pending.user@example.com'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(202)]" message="Expected HTTP 202"/>
+            <munit-tools:verify-call processor="db:insert" times="1"/>
+            <munit-tools:verify-call processor="email:send" times="1"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="resend-email-failure-marks-failed-and-still-returns-202" description="If the email cannot be sent after retries the email is marked FAILED and 202 is still returned">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Find account by email"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{customer_id: 'CUS-2026-222222', first_name: 'Asha', account_status: 'PENDING_VERIFICATION', company_name: 'Acme Test Pvt Ltd'}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Count recent tokens"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[output application/java --- [{cnt: 0}]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:update">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 1}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="email:send">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="MULE:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <munit:set-event>
+                <munit:payload value="#[output application/json --- {email: 'pending.user@example.com'}]" encoding="UTF-8" mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="post:\customers\resend-verification:application\json:customer-onboarding-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus]" is="#[MunitTools::equalTo(202)]" message="Expected HTTP 202"/>
+            <munit-tools:verify-call processor="db:update" times="1">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Mark email FAILED"/>
+                </munit-tools:with-attributes>
+            </munit-tools:verify-call>
+        </munit:validation>
+    </munit:test>
+</mule>
