@@ -13,3 +13,4 @@ target/
 Thumbs.db
 
 src/main/resources/config.properties
+src/main/resources/secure.properties

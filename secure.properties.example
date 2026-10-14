@@ -1,0 +1,6 @@
+# Copy to src/main/resources/secure.properties only after replacing each value
+# with output encrypted using the same AES/CBC settings and 16-byte key.
+# These placeholders are not encrypted values and will not start the application.
+db.password=![REPLACE_WITH_ENCRYPTED_DB_PASSWORD]
+smtp.user=![REPLACE_WITH_ENCRYPTED_SMTP_USERNAME]
+smtp.password=![REPLACE_WITH_ENCRYPTED_SMTP_PASSWORD]

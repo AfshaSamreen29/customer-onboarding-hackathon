@@ -1,0 +1,13 @@
+# Copy to src/main/resources/config.properties and set environment-specific values.
+db.host=localhost
+db.port=3306
+db.name=onboarding
+db.user=onboarding_app
+
+smtp.host=smtp.example.net
+smtp.port=587
+smtp.from=verified-sender@example.net
+
+app.verifyBaseUrl=https://your-public-host.example/api/v1/customers/verify
+queue.publishName=provisioningQueue
+resend.maxPerHour=3
