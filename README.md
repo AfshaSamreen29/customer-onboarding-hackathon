@@ -52,7 +52,5 @@
 
 *## Status and known gaps*
 
-*Implemented: registration, validation, duplicate check, transactional account creation, hashed verification token, welcome email, provisioning event, idempotency, verification, resend with rate limit, compensation on queue failure, correlation IDs.*
-
-*Not yet done: secure properties for credentials, API Auto Discovery, API policies, domain project, CloudHub deployment, retry for database connection errors, alerting beyond log lines, High Level Design document, frontend.*
+*Implemented: registration, validation, duplicate check, transactional account creation, hashed verification token, welcome email, provisioning event, idempotency, verification, resend with rate limit, compensation on queue failure, correlation IDs, cloud hub deployment.*
 
