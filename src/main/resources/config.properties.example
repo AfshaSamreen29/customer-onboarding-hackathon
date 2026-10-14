@@ -1,0 +1,14 @@
+db.host=localhost
+db.port=3306
+db.name=onboarding
+db.user=your_db_user
+db.password=CHANGE_ME
+
+smtp.host=sandbox.smtp.mailtrap.io
+smtp.port=2525
+smtp.user=CHANGE_ME
+smtp.password=CHANGE_ME
+
+app.verifyBaseUrl=http://localhost:8081/api/v1/customers/verify
+queue.publishName=provisioningQueue
+resend.maxPerHour=3
